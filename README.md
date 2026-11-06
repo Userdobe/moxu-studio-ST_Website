@@ -198,14 +198,18 @@ openssl rand -hex 32
 npm start
 ```
 
-### GitHub 与在线测试部署
+### Render 与在线测试部署
 
 GitHub 用于托管源代码，不能直接运行本项目的 Express 后端。GitHub Pages 只能托管静态前端；若要让用户注册、登录并保存项目，需要同时部署前端静态站点和 Node.js 后端，并为后端配置持久化存储。
 
-1. 将仓库连接到支持 Node.js Web Service 的托管平台，后端使用 `npm start` 启动。
-2. 将前端配置为静态站点，构建命令使用 `npm run build`，发布目录为 `dist`，并在构建环境设置 `VITE_API_BASE_URL` 为后端 HTTPS 地址。
-3. 后端设置 `FRONTEND_ORIGINS` 为前端 HTTPS 来源，配置稳定的 `MODEL_CONFIG_SECRET`，并将 `DATA_DIRECTORY` 指向持久化磁盘挂载目录。
-4. 完成部署后，用前端 `/api/health` 的后端地址检查服务，再使用注册页面创建新账号并验证项目保存。上线后应将公网前端、后端测试地址补充到“本地测试入口”。
+仓库根目录的 `render.yaml` 已定义前后端服务：静态前端构建并发布 `dist/`，Express API 使用 `npm start`，并自动互相配置公网来源和 API URL。API 数据目录挂载到 `/var/data` 持久磁盘，SPA 路由会回退到 `index.html`。
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Userdobe/moxu-studio-ST_Website)
+
+1. 在 Render Dashboard 创建 Blueprint，选择本 GitHub 仓库并检查将创建的资源。
+2. 按 Render 提示设置未同步的 `ADMIN_EMAILS`，填写允许访问只读管理后台的邮箱。
+3. 确认 API 的付费实例和持久磁盘价格后再创建；持久磁盘不适用于免费 Web Service，服务与磁盘会产生费用。
+4. 部署成功后，分别使用 Render 提供的前端和后端 URL 测试注册、登录、项目保存和后端 `/api/health`。测试通过后，将两个公网地址补充到“本地测试入口”。
 
 当前邮箱注册 API 已开放，新账号默认获得 100 体验积分；生产环境模拟充值关闭，正式支付尚未接入。公开仓库本身不会产生在线服务地址，也不会自动创建或托管生产数据库。上线前应选择托管平台并确认其费用、持久化策略和备份方式。
 

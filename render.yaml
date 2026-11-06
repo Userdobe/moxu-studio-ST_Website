@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: moxu-api
+    runtime: node
+    plan: 0.5c-512mb
+    region: singapore
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: moxu-user-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "24.21.0"
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIRECTORY
+        value: /var/data
+      - key: FRONTEND_ORIGINS
+        fromService:
+          name: moxu-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: MODEL_CONFIG_SECRET
+        generateValue: true
+      - key: OBSERVABILITY_TOKEN
+        generateValue: true
+      - key: ADMIN_EMAILS
+        sync: false
+
+  - type: web
+    name: moxu-web
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: NODE_VERSION
+        value: "24.21.0"
+      - key: VITE_API_BASE_URL
+        fromService:
+          name: moxu-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
