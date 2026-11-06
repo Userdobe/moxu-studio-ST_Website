@@ -1115,7 +1115,7 @@ function App() {
           <div className="heading-meta"><button className="outline-button" onClick={() => navigateTo(project.projectType ?? 'canvas')}><FolderOpen size={14} /> 所有项目</button></div>
         </div>}
 
-        <main className="main-content">
+        <main className={`main-content ${activeNav === 'script' && scriptView === 'breakdown' ? 'main-content-wide' : ''}`}>
           {isProjectEditor && project.projectType === 'canvas' && <div className="canvas-top">
             <div className="canvas-tabs">
               <div className="canvas-tab selected"><Frame size={15} /> 故事画布 <span className="tab-count">{project.scenes.length}</span></div>
@@ -1401,7 +1401,7 @@ function App() {
                   </section>
                 })}
               </section>
-            ) : <section className="tool-view">
+            ) : <section className="tool-view script-editor-view">
               <div className="tool-view-head"><div className="tool-kicker">SCRIPT TO STORYBOARD / 01</div><h2>让故事，长出画面。</h2><p>剧本内容和生成的分镜已独立保存，可随时从「短剧工坊」项目列表继续。</p></div>
               <div className="script-workbench">
                 <div className="script-input-panel">

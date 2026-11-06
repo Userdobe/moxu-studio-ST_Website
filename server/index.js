@@ -12,6 +12,11 @@ import { fileURLToPath } from 'node:url'
 const app = express()
 const port = Number(process.env.PORT || 3001)
 const root = path.dirname(fileURLToPath(import.meta.url))
+try {
+  process.loadEnvFile(path.join(root, '..', '.env'))
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error
+}
 const dataDirectory = process.env.DATA_DIRECTORY ? path.resolve(process.env.DATA_DIRECTORY) : path.join(root, '..', 'data')
 const storeFile = path.join(dataDirectory, 'accounts.json')
 const directHttpAgent = new http.Agent({ keepAlive: true })
@@ -140,6 +145,18 @@ function authRequired(request, response, next) {
   const user = store.users.find((candidate) => candidate.id === session.userId)
   if (!user) return response.status(401).json({ error: '登录已失效，请重新登录' })
   request.user = user
+  next()
+}
+
+function adminRequired(request, response, next) {
+  const adminEmails = (process.env.ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+  if (!adminEmails.length) return response.status(503).json({ error: '后台尚未配置管理员邮箱' })
+  if (!adminEmails.includes(request.user.email.toLowerCase())) {
+    return response.status(403).json({ error: '当前账号没有后台访问权限' })
+  }
   next()
 }
 
@@ -735,6 +752,20 @@ app.get('/api/auth/me', authRequired, (request, response) => {
   accountResponse(request.user).then((data) => response.json(data)).catch((error) => response.status(500).json({ error: error.message }))
 })
 
+app.get('/api/admin/me', authRequired, adminRequired, (request, response) => {
+  response.set('Cache-Control', 'no-store')
+  response.json({ user: { username: request.user.username ?? request.user.email, email: request.user.email, name: request.user.name } })
+})
+
+app.get('/api/admin/usage', authRequired, adminRequired, (request, response) => {
+  const windowName = request.query.window ?? '24h'
+  if (typeof windowName !== 'string' || !['1h', '24h', '7d', '30d'].includes(windowName)) {
+    return response.status(400).json({ error: 'window 仅支持 1h、24h、7d、30d' })
+  }
+  response.set('Cache-Control', 'no-store')
+  response.json(getUsageSnapshot(windowName))
+})
+
 app.patch('/api/account/profile', authRequired, async (request, response, next) => {
   try {
     const name = typeof request.body?.name === 'string' ? request.body.name.trim() : ''
@@ -1293,7 +1324,13 @@ app.post('/api/tools/breakdown', authRequired, async (request, response) => {
       body: JSON.stringify({
         model: config.model,
         temperature: 0.4,
-        max_tokens: 8192,
+        max_tokens: 16384,
+        ...(new URL(config.baseUrl).hostname === 'open.bigmodel.cn'
+          ? {
+            thinking: { type: 'disabled' },
+            response_format: { type: 'json_object' },
+          }
+          : {}),
         messages: [
           {
             role: 'system',
@@ -1309,19 +1346,35 @@ app.post('/api/tools/breakdown', authRequired, async (request, response) => {
       return response.status(502).json({ error: `大模型请求失败（HTTP ${result.status}）${detail ? `：${detail.slice(0, 240)}` : ''}` })
     }
     const payload = await result.json()
-    const modelContent = payload.choices?.[0]?.message?.content
+    const finishReason = payload.choices?.[0]?.finish_reason
+    const message = payload.choices?.[0]?.message
+    const modelContent = message?.content
     const content = typeof modelContent === 'string'
       ? modelContent
       : Array.isArray(modelContent)
         ? modelContent.map((part) => typeof part?.text === 'string' ? part.text : '').join('\n')
         : ''
-    if (!content.trim()) return response.status(502).json({ error: '大模型未返回有效内容' })
+    if (!content.trim()) {
+      const reasoningLength = typeof message?.reasoning_content === 'string' ? message.reasoning_content.length : 0
+      const completionTokens = Number.isFinite(payload.usage?.completion_tokens) ? payload.usage.completion_tokens : 'unknown'
+      console.error(`Script breakdown returned empty content (${config.model}, finish_reason: ${finishReason ?? 'unknown'}, reasoning chars: ${reasoningLength}, completion tokens: ${completionTokens})`)
+      return response.status(502).json({
+        error: finishReason === 'length'
+          ? '大模型输出达到长度上限，未返回完整分镜。请缩短剧本或减少 Skill 内容后重试；本次未扣除站内积分'
+          : reasoningLength
+            ? '大模型只返回了思考过程，没有最终分镜内容。请确认思考模式已关闭后重试；本次未扣除站内积分'
+            : '大模型返回了空内容，请检查服务商状态后重试；本次未扣除站内积分',
+      })
+    }
     let parsed
     try {
       parsed = parseModelJson(content)
     } catch {
-      console.error(`Script breakdown returned invalid JSON (${config.model}, ${content.length} chars)`)
-      return response.status(502).json({ error: '大模型没有按 JSON 格式返回视频分镜，请减少 Skill 内容后重试' })
+      console.error(`Script breakdown returned invalid JSON (${config.model}, ${content.length} chars, finish_reason: ${finishReason ?? 'unknown'})`)
+      if (finishReason === 'length') {
+        return response.status(502).json({ error: '大模型输出达到长度上限，分镜 JSON 不完整。请缩短本次剧本或减少 Skill 提示词后重试；本次未扣除站内积分' })
+      }
+      return response.status(502).json({ error: '大模型没有按 JSON 格式返回视频分镜，请减少所选 Skill 或精简提示词后重试；本次未扣除站内积分' })
     }
     if (!Array.isArray(parsed.scenes) || !parsed.scenes.length) return response.status(502).json({ error: '大模型没有识别出可用场景' })
     const normalizeFields = (value) => {
