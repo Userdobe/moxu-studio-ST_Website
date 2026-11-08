@@ -3,14 +3,14 @@ import type { ChangeEvent, CSSProperties, FormEvent, PointerEvent, WheelEvent } 
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, Bell, Check, ChevronDown, ChevronLeft,
   ChevronRight, CircleHelp, Clapperboard, Clock3, Coins, Copy, Cpu, CreditCard,
-  FileText, Film, Frame, FolderOpen, House, Image, ImagePlus, KeyRound, Layers3,
-  LayoutGrid, LockKeyhole, LogOut, Maximize, MessageSquare, MoreHorizontal,
-  MousePointer2, Move, PanelRightClose, Plus, Search, Settings2, ShieldCheck, Trash2,
+  FileText, Film, Frame, FolderOpen, House, Image, ImagePlus, KeyRound, Layers3, Package,
+  LayoutGrid, LockKeyhole, LogOut, Maximize, MoreHorizontal,
+  MapPin, MousePointer2, Move, PanelRightClose, Palette, Plus, Search, Settings2, ShieldCheck, Trash2,
   RefreshCw, Sparkles, SquarePen, UserRound, Video,
   WandSparkles, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { Project, Scene } from './types'
+import type { CreativeAsset, Project, Scene, ShowcaseItem } from './types'
 
 const initialProject: Project = {
   title: '雾山来信',
@@ -24,12 +24,20 @@ const initialProject: Project = {
   ],
 }
 
+const fallbackShowcase: ShowcaseItem[] = [
+  { id: 'showcase-rain', kind: 'image', title: '雨停之前', caption: '雾山来信 · Frame 01', tag: '雨夜', art: 'art-rain' },
+  { id: 'showcase-glass', kind: 'image', title: '玻璃另一侧', caption: '无声告白 · Frame 08', tag: '重逢', art: 'art-glass' },
+  { id: 'showcase-letter', kind: 'image', title: '被遗忘的信', caption: '十年以后 · Frame 03', tag: '回忆', art: 'art-letter' },
+  { id: 'showcase-rain-video', kind: 'video', title: '山城雨夜', caption: '雾山来信 · 预告片', duration: '00:38', art: 'video-rain' },
+  { id: 'showcase-dawn-video', kind: 'video', title: '天亮之后', caption: '写给明天 · 第 01 集', duration: '01:12', art: 'video-dawn' },
+]
+
 const navItems: { icon: LucideIcon; label: string; key: string }[] = [
   { icon: House, label: '创作首页', key: 'home' },
   { icon: LayoutGrid, label: '创作画布', key: 'canvas' },
   { icon: FileText, label: '剧本工坊', key: 'script' },
   { icon: WandSparkles, label: 'SKILL', key: 'skills' },
-  { icon: Layers3, label: '角色设定', key: 'characters' },
+  { icon: Layers3, label: '资产库', key: 'assets' },
   { icon: Film, label: '成片管理', key: 'export' },
   { icon: Settings2, label: '个人设置', key: 'settings' },
 ]
@@ -63,7 +71,7 @@ type Transaction = {
 type AccountResponse = { user: User; transactions: Transaction[]; rechargeMode: 'mock' | 'disabled' }
 type ProjectType = 'canvas' | 'script'
 type ModelForm = { provider: string; baseUrl: string; model: string; apiKey: string }
-type VideoGenerationOptions = { duration: string; aspectRatio: string }
+type VideoGenerationOptions = { duration: string; aspectRatio: string; resolution: string }
 type VideoTaskStatus = {
   taskId: string
   status: 'pending' | 'running' | 'success' | 'failed'
@@ -82,7 +90,7 @@ const builtInSkills: CreativeSkill[] = [
 const defaultPromptTemplate = '请按照以下创作规范拆解剧本，保留原意，不要编造剧情：\n{skill}\n\n剧本原文：\n{script}'
 const defaultSkillSettings: SkillSettings = { selectedSkillIds: ['storyboard'], customSkills: [], promptTemplate: defaultPromptTemplate }
 const modelKindLabels: Record<ModelKind, string> = { chat: '聊天模型', image: '图片模型', video: '视频模型', audio: '音频模型' }
-const defaultVideoGenerationOptions: VideoGenerationOptions = { duration: '5', aspectRatio: '9:16' }
+const defaultVideoGenerationOptions: VideoGenerationOptions = { duration: '5', aspectRatio: '9:16', resolution: '720p' }
 const emptyModelForm = (kind: ModelKind): ModelForm => kind === 'chat'
   ? { provider: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: '' }
   : { provider: '自定义', baseUrl: '', model: '', apiKey: '' }
@@ -101,6 +109,34 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) throw new Error(result.error || '请求失败，请稍后重试')
   return result as T
+}
+
+function projectTimestamp(project: Project) {
+  const time = new Date(project.updatedAt).getTime()
+  return Number.isFinite(time) ? time : 0
+}
+
+function relativeTime(value: string) {
+  const time = new Date(value).getTime()
+  if (!Number.isFinite(time)) return value || '刚刚'
+  const diff = Date.now() - time
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
+  return new Date(value).toLocaleDateString('zh-CN')
+}
+
+function downloadTextFile(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename.replace(/[\\/:*?"<>|]/g, '-')
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function App() {
@@ -134,7 +170,7 @@ function App() {
   const [authForm, setAuthForm] = useState({ email: '', password: '', name: '' })
   const [authError, setAuthError] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'profile' | 'credits' | 'model'>('profile')
+  const [settingsTab, setSettingsTab] = useState<'profile' | 'credits' | 'model' | 'appearance'>('profile')
   const [profileName, setProfileName] = useState('')
   const [modelKind, setModelKind] = useState<ModelKind>('chat')
   const [modelForms, setModelForms] = useState<Record<ModelKind, ModelForm>>({
@@ -157,12 +193,42 @@ function App() {
   const [projectBusy, setProjectBusy] = useState(false)
   const [projectEditorOpen, setProjectEditorOpen] = useState(false)
   const [scriptView, setScriptView] = useState<'editor' | 'breakdown'>('editor')
+  const [assetCategory, setAssetCategory] = useState<'characters' | 'scenes' | 'props' | 'videos'>('characters')
+  const [frontTheme, setFrontTheme] = useState<'light' | 'dark'>('dark')
+  const [frontAccent, setFrontAccent] = useState('#d3ef86')
+  const [frontDensity, setFrontDensity] = useState<'comfortable' | 'compact'>('comfortable')
+  const [frontRadius, setFrontRadius] = useState<'soft' | 'sharp'>('soft')
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [paletteQuery, setPaletteQuery] = useState('')
+  const [paletteCursor, setPaletteCursor] = useState(0)
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [libraryQuery, setLibraryQuery] = useState('')
+  const [librarySort, setLibrarySort] = useState<'recent' | 'name' | 'scenes'>('recent')
+  const [projectsLoading, setProjectsLoading] = useState(false)
+  const [showGrid, setShowGrid] = useState(true)
+  const [showConnections, setShowConnections] = useState(true)
+  const [canvasSettingsOpen, setCanvasSettingsOpen] = useState(false)
+  const [showcaseItems, setShowcaseItems] = useState<ShowcaseItem[]>(fallbackShowcase)
   const canvasRef = useRef<HTMLDivElement>(null)
   const spaceHeldRef = useRef(false)
   const dragRef = useRef<{ id: string | null; startX: number; startY: number; nodeX: number; nodeY: number; panX: number; panY: number } | null>(null)
   const videoStatusRequestsRef = useRef(new Set<string>())
   const videoStatusErrorsRef = useRef(new Set<string>())
   const videoTaskTimeoutNoticesRef = useRef(new Set<string>())
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('moxu-front-appearance') ?? '{}')
+      if (saved.theme === 'light' || saved.theme === 'dark') setFrontTheme(saved.theme)
+      if (typeof saved.accent === 'string') setFrontAccent(saved.accent)
+      if (saved.density === 'compact' || saved.density === 'comfortable') setFrontDensity(saved.density)
+      if (saved.radius === 'sharp' || saved.radius === 'soft') setFrontRadius(saved.radius)
+    } catch { /* ignore malformed local preferences */ }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem('moxu-front-appearance', JSON.stringify({ theme: frontTheme, accent: frontAccent, density: frontDensity, radius: frontRadius }))
+  }, [frontAccent, frontDensity, frontRadius, frontTheme])
 
   const selectedScene = project.scenes.find((scene) => scene.id === selectedId) ?? project.scenes[0]
   const expandedVideoPromptScene = project.scenes.find((scene) => scene.id === expandedVideoPromptSceneId)
@@ -221,12 +287,39 @@ function App() {
   useEffect(() => {
     if (!user) {
       setSavedProjects([])
+      setProjectsLoading(false)
       return
     }
+    setProjectsLoading(true)
     apiRequest<Project[]>('/api/projects')
       .then(setSavedProjects)
       .catch(() => setNotice('项目列表读取失败，请检查后端服务'))
+      .finally(() => setProjectsLoading(false))
   }, [user?.id])
+
+  useEffect(() => {
+    apiRequest<ShowcaseItem[]>('/api/showcase')
+      .then((items) => setShowcaseItems(items.length ? items : fallbackShowcase))
+      .catch(() => setShowcaseItems(fallbackShowcase))
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setPaletteOpen((open) => !open)
+        setPaletteQuery('')
+        setPaletteCursor(0)
+      }
+      if (event.key === 'Escape') {
+        setPaletteOpen(false)
+        setNotificationsOpen(false)
+        setCanvasSettingsOpen(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   useEffect(() => {
     if (saved || !user || !project.id) return
@@ -440,6 +533,46 @@ function App() {
     }
   }
 
+  const duplicateProject = async (item: Project) => {
+    if (!item.id) return
+    setProjectBusy(true)
+    try {
+      const created = await apiRequest<Project>('/api/projects', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...item,
+          id: undefined,
+          title: `${item.title} 副本`,
+          subtitle: item.subtitle,
+          updatedAt: new Date().toISOString(),
+        }),
+      })
+      setSavedProjects((current) => [created, ...current])
+      setNotice('项目已复制，可从项目库继续编辑副本')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '复制项目失败')
+    } finally {
+      setProjectBusy(false)
+    }
+  }
+
+  const renameProject = async (item: Project) => {
+    if (!item.id) return
+    const title = window.prompt('重命名项目', item.title)?.trim()
+    if (!title || title === item.title) return
+    try {
+      const updated = await apiRequest<Project>(`/api/projects/${item.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ ...item, title, updatedAt: new Date().toISOString() }),
+      })
+      setSavedProjects((current) => current.map((entry) => entry.id === item.id ? updated : entry))
+      setProject((current) => current.id === item.id ? updated : current)
+      setNotice('项目已重命名')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '重命名项目失败')
+    }
+  }
+
   const updateScene = (id: string, patch: Partial<Scene>) => {
     updateProject((current) => ({ ...current, scenes: current.scenes.map((scene) => scene.id === id ? { ...scene, ...patch } : scene) }))
   }
@@ -538,7 +671,7 @@ function App() {
       const colors = ['amber', 'lilac', 'sage', 'rose']
       const created = result.scenes.map((item, index) => ({
         id: `s${Date.now()}-${index}`, title: item.title, description: item.description,
-        videoPrompt: item.videoPrompt ?? item.description,
+        videoPrompt: `${item.videoPrompt ?? item.description}${(item.assetReferences ?? []).filter((name) => !(item.videoPrompt ?? item.description).includes(`@${name}`)).map((name) => ` @${name}`).join('')}`,
         assetReferences: item.assetReferences ?? [],
         location: 'location' in item && typeof item.location === 'string' ? item.location : '',
         time: 'time' in item && typeof item.time === 'string' ? item.time : '',
@@ -548,11 +681,17 @@ function App() {
         x: 160 + (index % 2) * 440, y: 150 + Math.floor(index / 2) * 350,
         ...('details' in item && item.details ? { details: item.details } : {}),
       }))
+      const inferredAssets: CreativeAsset[] = [
+        ...(result.characters ?? []).map((asset, index) => ({ id: `character-${index}-${Date.now()}`, type: 'character' as const, name: asset['角色名称'] ?? asset['人物名称'] ?? asset['姓名'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? `角色${index + 1}`, prompt: Object.entries(asset).filter(([key]) => !['角色名称', '人物名称', '姓名', '名称', 'name'].includes(key)).map(([key, value]) => `${key}：${value}`).join('\n') })),
+        ...(result.props ?? []).map((asset, index) => ({ id: `prop-${index}-${Date.now()}`, type: 'prop' as const, name: asset['道具名称'] ?? asset['物品名称'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? `物品${index + 1}`, prompt: Object.entries(asset).filter(([key]) => !['道具名称', '物品名称', '名称', 'name'].includes(key)).map(([key, value]) => `${key}：${value}`).join('\n') })),
+        ...created.filter((scene) => scene.location.trim()).map((scene, index) => ({ id: `scene-${index}-${Date.now()}`, type: 'scene' as const, name: scene.location.trim(), prompt: [scene.description, scene.time && `时间：${scene.time}`, scene.mood && `氛围：${scene.mood}`].filter(Boolean).join('\n') })),
+      ]
       updateProject((current) => ({
         ...current,
         scriptText: script,
         scenes: [...current.scenes, ...created],
         breakdownTables: { characters: result.characters ?? [], props: result.props ?? [] },
+        assets: [...(current.assets ?? []), ...inferredAssets.filter((asset) => !(current.assets ?? []).some((existing) => existing.type === asset.type && existing.name === asset.name))],
       }))
       await refreshAccount()
       setScriptView('breakdown')
@@ -704,6 +843,58 @@ function App() {
     updateBreakdownScene(scene.id, { assetReferences: nextReferences })
   }
 
+  const updateAsset = (assetId: string, patch: Partial<CreativeAsset>) => updateProject((current) => ({
+    ...current,
+    assets: (current.assets ?? []).map((asset) => asset.id === assetId ? { ...asset, ...patch } : asset),
+  }))
+
+  const addManualAsset = () => {
+    const name = window.prompt(`新增${assetCategory === 'characters' ? '角色' : assetCategory === 'scenes' ? '场景' : '物品'}资产名称`)?.trim()
+    if (!name) return
+    const type = assetCategory === 'characters' ? 'character' : assetCategory === 'scenes' ? 'scene' : 'prop'
+    updateProject((current) => ({ ...current, assets: [...(current.assets ?? []), { id: `asset-${Date.now()}`, type, name, prompt: '' }] }))
+  }
+
+  const handleAssetMediaChange = (assetId: string, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!/^image\/(png|jpe?g|webp|gif)|^video\/(mp4|webm|quicktime)$/.test(file.type)) {
+      setNotice('仅支持 PNG、JPG、WebP、GIF、MP4、WebM 或 MOV 文件')
+      return
+    }
+    if (file.size > 4 * 1024 * 1024) {
+      setNotice('单个资产文件不能超过 4 MB')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => updateAsset(assetId, { mediaUrl: String(reader.result), mediaType: file.type.startsWith('video/') ? 'video' : 'image', mediaName: file.name, mediaSize: file.size })
+    reader.readAsDataURL(file)
+  }
+
+  const handleLibraryMediaChange = (name: string, type: CreativeAsset['type'], event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) return setNotice('请选择图片或视频文件')
+    if (file.size > 4 * 1024 * 1024) return setNotice('单个资产文件不能超过 4 MB')
+    const reader = new FileReader()
+    reader.onload = () => updateProject((current) => {
+      const media = { mediaUrl: String(reader.result), mediaType: file.type.startsWith('video/') ? 'video' as const : 'image' as const, mediaName: file.name, mediaSize: file.size }
+      const existing = (current.assets ?? []).some((asset) => asset.type === type && asset.name === name)
+      return { ...current, assets: existing ? (current.assets ?? []).map((asset) => asset.type === type && asset.name === name ? { ...asset, ...media } : asset) : [...(current.assets ?? []), { id: `asset-${Date.now()}`, type, name, prompt: '', ...media }] }
+    })
+    reader.readAsDataURL(file)
+  }
+
+  const addAssetReference = (scene: Scene, asset: CreativeAsset) => {
+    const reference = `@${asset.name}`
+    const prompt = scene.videoPrompt ?? ''
+    if (!new RegExp(`(^|\\s)${reference.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}(?=\\s|$)`).test(prompt)) {
+      updateBreakdownScene(scene.id, { videoPrompt: `${prompt}${prompt ? ' ' : ''}${reference}`, assetReferences: [...new Set([...(scene.assetReferences ?? []), asset.name])] })
+    }
+  }
+
   const generateSceneVideo = async (scene: Scene) => {
     if (!modelKeyHints.video) {
       setNotice('请先在个人设置中配置视频模型')
@@ -726,7 +917,7 @@ function App() {
       return
     }
     const options = videoGenerationOptions[scene.id] ?? defaultVideoGenerationOptions
-    if (!window.confirm(`即将向服务商提交 ${options.duration} 秒 Muse Video 任务，费用按时长计费。本站不扣积分，是否继续？`)) return
+    if (!window.confirm(`即将向服务商提交 ${options.duration} 秒、${options.resolution}、${options.aspectRatio} 的 Muse Video 任务，费用按时长计费。本站不扣积分，是否继续？`)) return
     try {
       setVideoGenerationBusy(scene.id)
       const result = await apiRequest<{ taskId: string; status: 'pending' | 'running'; progress: string; startedAt: string }>('/api/tools/video/generate', {
@@ -736,6 +927,7 @@ function App() {
           sceneId: scene.id,
           duration: options.duration,
           aspectRatio: options.aspectRatio,
+          resolution: options.resolution,
         }),
       })
       updateProject((current) => ({
@@ -787,6 +979,34 @@ function App() {
     link.click()
     URL.revokeObjectURL(url)
     setNotice('项目文件已导出')
+  }
+
+  const exportShotList = () => {
+    const lines = [
+      `# ${project.title}`,
+      '',
+      project.subtitle ? `> ${project.subtitle}` : '',
+      '',
+      `- 导出时间：${new Date().toLocaleString('zh-CN')}`,
+      `- 分镜数量：${project.scenes.length}`,
+      '',
+    ]
+    project.scenes.forEach((scene, index) => {
+      lines.push(`## ${String(index + 1).padStart(2, '0')} · ${scene.title}`, '')
+      lines.push(`- 场景：${scene.location || '—'}`)
+      lines.push(`- 时间：${scene.time || '—'}`)
+      lines.push(`- 情绪：${scene.mood || '—'}`)
+      lines.push(`- 镜头：${scene.shot || '—'}`)
+      lines.push('', scene.description || '', '')
+      if (scene.details && Object.keys(scene.details).length > 0) {
+        Object.entries(scene.details).forEach(([label, value]) => { if (value) lines.push(`- ${label}：${value}`) })
+        lines.push('')
+      }
+      if (scene.videoPrompt) lines.push('**视频提示词**', '', scene.videoPrompt, '')
+      if (scene.videoUrl) lines.push(`[已生成视频](${scene.videoUrl})`, '')
+    })
+    downloadTextFile(`${project.title}-分镜表.md`, lines.join('\n'))
+    setNotice('分镜表已导出为 Markdown')
   }
 
   const createImagePrompt = () => {
@@ -1066,15 +1286,118 @@ function App() {
     canvas: '无限画布',
     script: '短剧工坊',
     skills: 'SKILL',
-    characters: '角色设定',
+    assets: '资产库',
     export: '作品管理',
     settings: '个人设置',
   }
-  const visibleProjects = savedProjects.filter((item) => item.projectType === activeNav)
+  const normalizedLibraryQuery = libraryQuery.trim().toLowerCase()
+  const matchesLibraryQuery = (item: Project) => !normalizedLibraryQuery
+    || `${item.title} ${item.subtitle} ${item.scriptText ?? ''}`.toLowerCase().includes(normalizedLibraryQuery)
+  const sortProjects = (list: Project[]) => [...list].sort((a, b) => {
+    if (librarySort === 'name') return a.title.localeCompare(b.title, 'zh-CN')
+    if (librarySort === 'scenes') return b.scenes.length - a.scenes.length
+    return projectTimestamp(b) - projectTimestamp(a)
+  })
+  const visibleProjects = sortProjects(savedProjects.filter((item) => item.projectType === activeNav && matchesLibraryQuery(item)))
+  const visibleShowcase = showcaseItems.filter((item) => item.visible !== false)
+  const imageShowcase = visibleShowcase.filter((item) => item.kind === 'image')
+  const videoShowcase = visibleShowcase.filter((item) => item.kind === 'video')
+  const renderLibraryCard = (item: Project, kind: 'canvas' | 'script') => (
+    <article className="library-project-card" key={item.id}>
+      <div className={`library-project-art ${kind === 'script' ? 'script-art' : ''}`}>
+        {kind === 'canvas'
+          ? <div className="library-art-dots"><i /><i /><i /><i /></div>
+          : <><div className="script-art-line" /><div className="script-art-line short" /><div className="script-art-line" /></>}
+        <span>{kind === 'canvas' ? 'CANVAS' : 'SCRIPT'} / {item.scenes.length} {kind === 'canvas' ? 'FRAMES' : 'SCENES'}</span>
+        <div className="library-project-actions">
+          <button onClick={() => renameProject(item)} title="重命名项目" aria-label="重命名项目"><SquarePen size={12} /></button>
+          <button onClick={() => duplicateProject(item)} title="复制项目" aria-label="复制项目"><Copy size={12} /></button>
+          <button onClick={() => deleteProject(item.id!)} title="删除项目" aria-label="删除项目">×</button>
+        </div>
+      </div>
+      <div className="library-project-info">
+        <span className="library-project-type">{kind === 'canvas' ? <Frame size={12} /> : <FileText size={12} />} {kind === 'canvas' ? '无限画布' : '短剧工坊'}</span>
+        <h3>{item.title}</h3>
+        <p>{kind === 'canvas' ? item.subtitle : item.scriptText?.slice(0, 50) || '还没有写下故事内容'}</p>
+        <div><small>{relativeTime(item.updatedAt)} · {item.scenes.length} 个场景</small><button onClick={() => openProject(item.id!)}>继续创作 <ArrowRight size={13} /></button></div>
+      </div>
+    </article>
+  )
+  const canManageProjects = Boolean(user) && savedProjects.some((item) => item.projectType === activeNav)
+  const renderLibraryToolbar = () => canManageProjects && (
+    <div className="library-toolbar">
+      <label className="library-search">
+        <Search size={14} />
+        <input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="搜索项目名称或剧本内容" aria-label="搜索项目" />
+        {libraryQuery && <button type="button" onClick={() => setLibraryQuery('')} aria-label="清空搜索">×</button>}
+      </label>
+      <div className="library-sort" role="group" aria-label="项目排序">
+        {([['recent', '最近更新'], ['name', '名称'], ['scenes', '场景数']] as const).map(([key, label]) => (
+          <button key={key} className={librarySort === key ? 'active' : ''} onClick={() => setLibrarySort(key)}>{label}</button>
+        ))}
+      </div>
+      <span className="library-result-count">{visibleProjects.length} 个项目</span>
+    </div>
+  )
+  const projectAssets = project.assets ?? []
+  const assetProjects = project.id
+    ? [project, ...savedProjects.filter((item) => item.id !== project.id)]
+    : savedProjects
+  const characterAssets = assetProjects.flatMap((item) => (item.breakdownTables?.characters ?? []).map((asset, index) => ({
+    id: `${item.id ?? item.title}-character-${index}`,
+    projectTitle: item.title,
+    name: asset['角色名称'] ?? asset['人物名称'] ?? asset['姓名'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? '未命名角色',
+    details: Object.entries(asset).filter(([key, value]) => key !== '角色名称' && key !== '人物名称' && key !== '姓名' && key !== '名称' && key !== 'name' && Boolean(value)),
+    media: (item.assets ?? []).find((candidate) => candidate.type === 'character' && candidate.name === (asset['角色名称'] ?? asset['人物名称'] ?? asset['姓名'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0])) ?? null,
+  })))
+  const sceneAssets = assetProjects.flatMap((item) => {
+    const seenLocations = new Set<string>()
+    return item.scenes.flatMap((scene) => {
+      const location = scene.location.trim() || scene.title
+      const key = location.toLowerCase()
+      if (seenLocations.has(key)) return []
+      seenLocations.add(key)
+      return [{ id: `${item.id ?? item.title}-scene-${scene.id}`, projectTitle: item.title, name: location, description: scene.description, time: scene.time, media: (item.assets ?? []).find((asset) => asset.type === 'scene' && asset.name === location) ?? null }]
+    })
+  })
+  const propAssets = assetProjects.flatMap((item) => (item.breakdownTables?.props ?? []).map((asset, index) => {
+    const name = asset['道具名称'] ?? asset['物品名称'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? `物品${index + 1}`
+    return { id: `${item.id ?? item.title}-prop-${index}`, projectTitle: item.title, name, description: Object.entries(asset).filter(([key]) => !['道具名称', '物品名称', '名称', 'name'].includes(key)).map(([, value]) => value).join('；'), media: (item.assets ?? []).find((candidate) => candidate.type === 'prop' && candidate.name === name) ?? null }
+  }))
+  const videoAssets = assetProjects.flatMap((item) => item.scenes
+    .filter((scene) => scene.videoUrl)
+    .map((scene) => ({ id: `${item.id ?? item.title}-video-${scene.id}`, projectTitle: item.title, name: scene.title, videoUrl: scene.videoUrl! })))
   const createProjectFromHome = () => createProject('script', idea.trim())
+  const onboardingSteps = [
+    { id: 'project', label: '创建第一个项目', hint: '从一句话、剧本或空白画布开始', done: savedProjects.length > 0, action: () => createProject('script', idea.trim()) },
+    { id: 'model', label: '连接一个模型', hint: '配置聊天模型后即可推理分镜', done: Object.values(modelKeyHints).some((hint) => Boolean((hint as { hasKey?: boolean } | undefined)?.hasKey)), action: () => { setActiveNav('settings'); setSettingsTab('model') } },
+    { id: 'shot', label: '生成第一组分镜', hint: '在短剧工坊中拆解剧本', done: savedProjects.some((item) => item.scenes.length > 0), action: () => navigateTo('script') },
+  ]
+  const onboardingCompleted = onboardingSteps.filter((step) => step.done).length
+  const paletteItems = [
+    ...navItems.filter((item) => item.key !== 'home').map((item) => ({
+      id: `nav-${item.key}`,
+      label: `前往${item.label}`,
+      hint: '工作台导航',
+      icon: item.icon,
+      run: () => navigateTo(item.key),
+    })),
+    ...savedProjects.slice(0, 8).map((item) => ({
+      id: `project-${item.id}`,
+      label: item.title,
+      hint: `${item.projectType === 'script' ? '短剧工坊' : '无限画布'} · ${item.scenes.length} 个场景`,
+      icon: item.projectType === 'script' ? FileText : Frame,
+      run: () => openProject(item.id!),
+    })),
+    { id: 'new-script', label: '新建短剧项目', hint: '从剧本拆解分镜', icon: FileText, run: () => createProject('script') },
+    { id: 'new-canvas', label: '新建画布项目', hint: '自由编排每一个镜头', icon: Frame, run: () => createProject('canvas') },
+    { id: 'model-settings', label: '配置模型', hint: '个人设置 · 模型配置', icon: Settings2, run: () => { navigateTo('settings'); setSettingsTab('model') } },
+  ]
+  const paletteResults = paletteItems.filter((item) => !paletteQuery.trim() || `${item.label} ${item.hint}`.toLowerCase().includes(paletteQuery.trim().toLowerCase())).slice(0, 9)
+  const noticeIsError = /失败|错误|无法|不能|请先|至少|不足|未配置|不支持|超时|异常|非法/.test(notice ?? '')
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell front-theme-${frontTheme} front-density-${frontDensity} front-radius-${frontRadius}`} style={{ '--front-accent': frontAccent } as CSSProperties}>
       <aside className="rail">
         <div className="brand-mark"><span>墨</span><i /></div>
         <div className="rail-divider" />
@@ -1097,10 +1420,31 @@ function App() {
           </div>
           <div className="topbar-actions">
             {user && <button className="credit-pill" onClick={() => { setActiveNav('settings'); setSettingsTab('credits') }}><Coins size={14} /> <b>{user.credits}</b><span>积分</span></button>}
-            <button className="top-icon" title="搜索"><Search size={17} /></button>
-            <button className="top-icon" title="通知"><Bell size={17} /><i className="notification-dot" /></button>
+            <button className="top-icon search-trigger" title="搜索项目（⌘K）" aria-label="搜索项目" onClick={() => { setPaletteOpen(true); setPaletteQuery(''); setPaletteCursor(0) }}><Search size={17} /><kbd>⌘K</kbd></button>
+            <div className="topbar-popover-wrap">
+              <button className={`top-icon ${notificationsOpen ? 'active' : ''}`} title="通知" aria-label="通知" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}><Bell size={17} /><i className="notification-dot" /></button>
+              {notificationsOpen && <>
+                <div className="popover-backdrop" onClick={() => setNotificationsOpen(false)} />
+                <div className="notification-panel" role="dialog" aria-label="通知">
+                  <div className="notification-panel-head"><b>通知中心</b><button onClick={() => setNotificationsOpen(false)} aria-label="关闭通知">×</button></div>
+                  <div className="notification-empty">
+                    <span><Bell size={18} /></span>
+                    <b>暂时没有新通知</b>
+                    <p>视频生成完成、积分变动和团队协作消息会出现在这里。</p>
+                  </div>
+                  {savedProjects.length > 0 && <div className="notification-list">
+                    <small>最近编辑</small>
+                    {savedProjects.slice(0, 4).map((item) => <button key={item.id} onClick={() => { setNotificationsOpen(false); openProject(item.id!) }}>
+                      <span className={`notification-icon ${item.projectType}`}>{item.projectType === 'canvas' ? <Frame size={13} /> : <FileText size={13} />}</span>
+                      <span><b>{item.title}</b><small>{relativeTime(item.updatedAt)} · {item.scenes.length} 个场景</small></span>
+                    </button>)}
+                  </div>}
+                  <button className="notification-more" onClick={() => { setNotificationsOpen(false); navigateTo('export') }}>查看全部作品 <ArrowRight size={12} /></button>
+                </div>
+              </>}
+            </div>
             <span className="top-separator" />
-            {isProjectEditor && <button className="share-button" onClick={exportProject}><ArrowDownToLine size={15} /> 导出项目</button>}
+            {isProjectEditor && <button className="share-button" onClick={exportProject} title="导出项目"><ArrowDownToLine size={15} /> 导出项目</button>}
             {activeNav === 'home' && <button className="publish-button" onClick={() => createProject('canvas')}><Plus size={15} /> 新建画布</button>}
             {isProjectEditor && project.projectType === 'canvas' && <button className="publish-button" onClick={() => setNotice('成片渲染需要接入视频生成服务，当前工作台暂不支持')}><Sparkles size={15} /> 生成成片</button>}
           </div>
@@ -1125,7 +1469,15 @@ function App() {
               <span className="action-divider" />
               <button className={`canvas-action tool ${toolMode === 'select' ? 'tool-active' : ''}`} title="选择工具" onClick={() => setToolMode('select')}><MousePointer2 size={16} /></button>
               <button className={`canvas-action tool ${toolMode === 'pan' ? 'tool-active' : ''}`} title="移动画布" onClick={() => setToolMode('pan')}><Move size={16} /></button>
-              <button className="canvas-action" title="画布设置"><Settings2 size={16} /></button>
+              <div className="canvas-settings-wrap">
+                <button className={`canvas-action ${canvasSettingsOpen ? 'tool-active' : ''}`} title="画布设置" onClick={() => setCanvasSettingsOpen((open) => !open)}><Settings2 size={16} /></button>
+                {canvasSettingsOpen && <div className="canvas-settings-popover">
+                  <b>画布设置</b>
+                  <label><span>显示网格</span><input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)} /></label>
+                  <label><span>显示连接线</span><input type="checkbox" checked={showConnections} onChange={(event) => setShowConnections(event.target.checked)} /></label>
+                  <button type="button" onClick={() => { setZoom(0.82); setOffset({ x: 0, y: 0 }); setCanvasSettingsOpen(false); setNotice('画布视图已重置') }}>重置视图</button>
+                </div>}
+              </div>
               <button className="canvas-action" title="适应画布" onClick={() => { setZoom(0.82); setOffset({ x: 0, y: 0 }) }}><Maximize size={15} /></button>
             </div>
           </div>
@@ -1147,21 +1499,57 @@ function App() {
                   <button onClick={() => createProject('script', idea.trim())}><FileText size={15} /><span><b>短剧工坊</b><small>从剧本拆解出完整分镜</small></span><Plus size={15} /></button>
                 </div>
               </div>
+              {user && onboardingCompleted < onboardingSteps.length && <section className="onboarding-card">
+                <div className="onboarding-head">
+                  <div><span className="tool-kicker">GETTING STARTED</span><h2>三步，让工作室运转起来</h2></div>
+                  <span className="onboarding-progress">{onboardingCompleted} / {onboardingSteps.length}</span>
+                </div>
+                <div className="onboarding-track"><i style={{ width: `${(onboardingCompleted / onboardingSteps.length) * 100}%` }} /></div>
+                <div className="onboarding-steps">
+                  {onboardingSteps.map((step, index) => (
+                    <button key={step.id} className={step.done ? 'done' : ''} onClick={step.action} disabled={step.done}>
+                      <span className="onboarding-index">{step.done ? <Check size={12} /> : String(index + 1).padStart(2, '0')}</span>
+                      <span><b>{step.label}</b><small>{step.done ? '已完成' : step.hint}</small></span>
+                      <ArrowRight size={13} />
+                    </button>
+                  ))}
+                </div>
+              </section>}
               <div className="showcase-section">
                 <div className="showcase-heading"><div><span className="tool-kicker">MADE WITH MOXU</span><h2>灵感作品集</h2></div><button onClick={() => navigateTo('export')}>查看全部 <ArrowRight size={14} /></button></div>
                 <div className="showcase-columns">
-                  <section className="showcase-column"><div className="showcase-label"><span><Image size={15} /> 画面灵感</span><small>IMAGE STUDIES · 03</small></div>
-                    <div className="image-gallery">{[
-                      ['art-rain', '雨停之前', '雾山来信 · Frame 01', '雨夜'],
-                      ['art-glass', '玻璃另一侧', '无声告白 · Frame 08', '重逢'],
-                      ['art-letter', '被遗忘的信', '十年以后 · Frame 03', '回忆'],
-                    ].map(([style, title, caption, tag]) => <button className="gallery-image-card" key={title} onClick={() => createProject('canvas')}><div className={`gallery-image ${style}`}><div className="art-orb" /><div className="art-horizon" /><div className="art-foreground" /><span>{tag}</span><i><Plus size={14} /></i></div><b>{title}</b><small>{caption}</small></button>)}</div>
+                  <section className="showcase-column">
+                    <div className="showcase-label"><span><Image size={15} /> 画面灵感</span><small>{`IMAGE STUDIES · ${String(imageShowcase.length).padStart(2, '0')}`}</small></div>
+                    {imageShowcase.length === 0 ? <p className="showcase-empty">还没有展示中的画面，管理员可在后台「作品展示」中添加。</p> : (
+                      <div className="image-gallery">{imageShowcase.map((item) => (
+                        <button className="gallery-image-card" key={item.id} onClick={() => createProject('canvas')}>
+                          <div className={`gallery-image ${item.art}`}>
+                            {item.mediaUrl && <img className="gallery-cover" src={item.mediaUrl} alt="" loading="lazy" />}
+                            <div className="art-orb" /><div className="art-horizon" /><div className="art-foreground" />
+                            {item.tag && <span>{item.tag}</span>}
+                            <i><Plus size={14} /></i>
+                          </div>
+                          <b>{item.title}</b>
+                          <small>{item.caption}</small>
+                        </button>
+                      ))}</div>
+                    )}
                   </section>
-                  <section className="showcase-column"><div className="showcase-label"><span><Video size={15} /> 漫剧短片</span><small>MOTION STORIES · 02</small></div>
-                    <div className="video-gallery">{[
-                      ['video-rain', '山城雨夜', '00:38', '雾山来信 · 预告片'],
-                      ['video-dawn', '天亮之后', '01:12', '写给明天 · 第 01 集'],
-                    ].map(([style, title, duration, caption]) => <button className="gallery-video-card" key={title} onClick={() => setNotice('视频预览将在成片渲染服务接入后开放')}><div className={`gallery-video ${style}`}><div className="video-play"><Video size={17} /></div><span>{duration}</span></div><b>{title}</b><small>{caption}</small></button>)}</div>
+                  <section className="showcase-column">
+                    <div className="showcase-label"><span><Video size={15} /> 漫剧短片</span><small>{`MOTION STORIES · ${String(videoShowcase.length).padStart(2, '0')}`}</small></div>
+                    {videoShowcase.length === 0 ? <p className="showcase-empty">还没有展示中的短片，管理员可在后台「作品展示」中添加。</p> : (
+                      <div className="video-gallery">{videoShowcase.map((item) => (
+                        <button className="gallery-video-card" key={item.id} onClick={() => setNotice('视频预览将在成片渲染服务接入后开放')}>
+                          <div className={`gallery-video ${item.art}`}>
+                            {item.mediaUrl && <img className="gallery-cover" src={item.mediaUrl} alt="" loading="lazy" />}
+                            <div className="video-play"><Video size={17} /></div>
+                            <span>{item.duration || '00:00'}</span>
+                          </div>
+                          <b>{item.title}</b>
+                          <small>{item.caption}</small>
+                        </button>
+                      ))}</div>
+                    )}
                   </section>
                 </div>
               </div>
@@ -1173,33 +1561,75 @@ function App() {
           ) : activeNav === 'canvas' && !isProjectEditor ? (
             <section className="library-view">
               <div className="library-heading"><div><div className="tool-kicker">INFINITE CANVAS / PROJECTS</div><h1>故事，在这里自由生长。</h1><p>创建独立画布项目，节点位置与分镜内容会自动保存。</p></div><button className="publish-button" disabled={projectBusy} onClick={() => createProject('canvas')}><Plus size={15} /> 新建画布项目</button></div>
-              <div className="project-library-grid">{visibleProjects.map((item) => <article className="library-project-card" key={item.id}><div className="library-project-art"><div className="library-art-dots"><i /><i /><i /><i /></div><span>CANVAS / {item.scenes.length} FRAMES</span><button onClick={() => deleteProject(item.id!)} title="删除项目">×</button></div><div className="library-project-info"><span className="library-project-type"><Frame size={12} /> 无限画布</span><h3>{item.title}</h3><p>{item.subtitle}</p><div><small>{new Date(item.updatedAt).toLocaleString('zh-CN')}</small><button onClick={() => openProject(item.id!)}>继续创作 <ArrowRight size={13} /></button></div></div></article>)}{visibleProjects.length === 0 && <div className="library-empty"><span><Frame size={22} /></span><h3>第一张故事画布</h3><p>新建一个项目，开始摆放场景与分镜。每个项目都独立保存，随时回来继续。</p><button className="outline-button" onClick={() => createProject('canvas')}><Plus size={14} /> 新建画布项目</button></div>}</div>
+              {renderLibraryToolbar()}
+              {projectsLoading ? <div className="library-skeleton">{[0, 1, 2].map((item) => <div className="skeleton-card" key={item}><span /><i /></div>)}</div> : <div className="project-library-grid">
+                {visibleProjects.map((item) => renderLibraryCard(item, 'canvas'))}
+                {visibleProjects.length === 0 && (normalizedLibraryQuery
+                  ? <div className="library-empty"><span><Search size={22} /></span><h3>没有匹配的项目</h3><p>换一个关键词试试，或清空搜索查看全部画布项目。</p><button className="outline-button" onClick={() => setLibraryQuery('')}>清空搜索</button></div>
+                  : <div className="library-empty"><span><Frame size={22} /></span><h3>第一张故事画布</h3><p>新建一个项目，开始摆放场景与分镜。每个项目都独立保存，随时回来继续。</p><button className="outline-button" onClick={() => createProject('canvas')}><Plus size={14} /> 新建画布项目</button></div>)}
+              </div>}
             </section>
           ) : activeNav === 'script' && !isProjectEditor ? (
             <section className="library-view">
               <div className="library-heading"><div><div className="tool-kicker">SCRIPT WORKSHOP / PROJECTS</div><h1>把文字，写成故事。</h1><p>每个短剧都是独立项目。剧本与已拆解分镜会自动保存。</p></div><button className="publish-button" disabled={projectBusy} onClick={() => createProject('script')}><Plus size={15} /> 新建短剧项目</button></div>
-              <div className="project-library-grid">{visibleProjects.map((item) => <article className="library-project-card" key={item.id}><div className="library-project-art script-art"><div className="script-art-line" /><div className="script-art-line short" /><div className="script-art-line" /><span>SCRIPT / {item.scenes.length} SCENES</span><button onClick={() => deleteProject(item.id!)} title="删除项目">×</button></div><div className="library-project-info"><span className="library-project-type"><FileText size={12} /> 短剧工坊</span><h3>{item.title}</h3><p>{item.scriptText?.slice(0, 50) || '还没有写下故事内容'}</p><div><small>{new Date(item.updatedAt).toLocaleString('zh-CN')}</small><button onClick={() => openProject(item.id!)}>继续创作 <ArrowRight size={13} /></button></div></div></article>)}{visibleProjects.length === 0 && <div className="library-empty"><span><FileText size={22} /></span><h3>写下第一集</h3><p>新建独立短剧项目，写下灵感、拆解分镜，稍后返回也会保留进度。</p><button className="outline-button" onClick={() => createProject('script')}><Plus size={14} /> 新建短剧项目</button></div>}</div>
+              {renderLibraryToolbar()}
+              {projectsLoading ? <div className="library-skeleton">{[0, 1, 2].map((item) => <div className="skeleton-card script" key={item}><span /><i /></div>)}</div> : <div className="project-library-grid">
+                {visibleProjects.map((item) => renderLibraryCard(item, 'script'))}
+                {visibleProjects.length === 0 && (normalizedLibraryQuery
+                  ? <div className="library-empty"><span><Search size={22} /></span><h3>没有匹配的项目</h3><p>换一个关键词试试，或清空搜索查看全部短剧项目。</p><button className="outline-button" onClick={() => setLibraryQuery('')}>清空搜索</button></div>
+                  : <div className="library-empty"><span><FileText size={22} /></span><h3>写下第一集</h3><p>新建独立短剧项目，写下灵感、拆解分镜，稍后返回也会保留进度。</p><button className="outline-button" onClick={() => createProject('script')}><Plus size={14} /> 新建短剧项目</button></div>)}
+              </div>}
             </section>
           ) : activeNav === 'script' && isProjectEditor ? (
             scriptView === 'breakdown' ? (
               <section className="tool-view breakdown-view">
+                <div className="breakdown-layout">
+                  <aside className="scene-rail">
+                    <div className="scene-rail-head"><span className="tool-kicker">SCENE INDEX</span><b>{String(project.scenes.length).padStart(2, '0')}</b></div>
+                    <div className="scene-rail-progress"><i style={{ width: `${Math.round((project.scenes.filter((scene) => scene.videoUrl).length / Math.max(project.scenes.length, 1)) * 100)}%` }} /></div>
+                    <div className="scene-rail-stats">
+                      <span><small>分镜</small><b>{project.scenes.length}</b></span>
+                      <span><small>已出片</small><b>{project.scenes.filter((scene) => scene.videoUrl).length}</b></span>
+                      <span><small>资产</small><b>{projectAssets.length + (project.breakdownTables?.characters?.length ?? 0) + (project.breakdownTables?.props?.length ?? 0)}</b></span>
+                    </div>
+                    <nav className="scene-rail-list" aria-label="分镜导航">
+                      {project.scenes.map((scene, index) => (
+                        <button
+                          key={scene.id}
+                          className={selectedId === scene.id ? 'active' : ''}
+                          onClick={() => {
+                            setSelectedId(scene.id)
+                            document.getElementById(`breakdown-scene-${scene.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                          }}
+                        >
+                          <span>{String(index + 1).padStart(2, '0')}</span>
+                          <b>{scene.title}</b>
+                          {scene.videoUrl && <i className="scene-rail-dot" title="已生成视频" />}
+                        </button>
+                      ))}
+                    </nav>
+                    <button className="scene-rail-export" onClick={exportShotList}><ArrowDownToLine size={13} /> 导出分镜表</button>
+                  </aside>
+                  <div className="breakdown-main">
                 <div className="breakdown-page-heading">
                   <div className="tool-view-head">
                     <div className="tool-kicker">STORYBOARD BREAKDOWN / {String(project.scenes.length).padStart(2, '0')} SCENES</div>
                     <h2>视频分镜提示词已准备就绪。</h2>
                     <p>每个分镜都可以编辑视频提示词、引用角色或道具资产，并在生成视频接口接入后进行预览。</p>
                   </div>
-                  <button className="outline-button" onClick={() => setScriptView('editor')}><ArrowLeft size={14} /> 返回剧本编辑</button>
+                  <div className="breakdown-heading-actions">
+                    <button className="outline-button" onClick={exportShotList}><ArrowDownToLine size={14} /> 导出分镜表</button>
+                    <button className="outline-button" onClick={() => setScriptView('editor')}><ArrowLeft size={14} /> 返回剧本编辑</button>
+                  </div>
                 </div>
                 <div className="breakdown-result-list">
                   {project.scenes.map((scene, index) => {
-                    const availableReferences = [...(project.breakdownTables?.characters ?? []), ...(project.breakdownTables?.props ?? [])]
-                      .map((asset) => asset['角色名称'] ?? asset['道具名称'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? '')
-                      .filter((name): name is string => Boolean(name))
+                    const legacyAssets = [...(project.breakdownTables?.characters ?? []).map((asset) => ({ name: asset['角色名称'] ?? asset['人物名称'] ?? asset['姓名'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? '', type: 'character' })), ...(project.breakdownTables?.props ?? []).map((asset) => ({ name: asset['道具名称'] ?? asset['物品名称'] ?? asset['名称'] ?? asset.name ?? Object.values(asset)[0] ?? '', type: 'prop' }))]
+                    const availableReferences: (CreativeAsset | { name: string; type: string })[] = [...projectAssets, ...legacyAssets.filter((asset) => !projectAssets.some((item) => item.name === asset.name))]
                     const videoOptions = videoGenerationOptions[scene.id] ?? defaultVideoGenerationOptions
                     const videoStatusLabels = { pending: '等待中', running: '生成中', success: '已完成', failed: '生成失败' } as const
                     return (
-                    <article className="breakdown-scene-card" key={scene.id}>
+                    <article className="breakdown-scene-card" key={scene.id} id={`breakdown-scene-${scene.id}`} onFocusCapture={() => setSelectedId(scene.id)}>
                       <div className="breakdown-scene-number">{String(index + 1).padStart(2, '0')}<span /></div>
                       <div className="breakdown-scene-content">
                         <div className="breakdown-scene-card-heading">
@@ -1233,7 +1663,7 @@ function App() {
                         </div>
                         <div className="video-prompt-editor">
                           <div className="video-prompt-heading">
-                            <label htmlFor={`video-prompt-${scene.id}`}>视频提示词</label>
+                            <div className="video-prompt-label"><Clapperboard size={13} /><label htmlFor={`video-prompt-${scene.id}`}>视频提示词</label><span>VIDEO PROMPT</span></div>
                             <div>
                               <button
                                 type="button"
@@ -1252,42 +1682,59 @@ function App() {
                               </button>
                             </div>
                           </div>
+                          <div className="video-prompt-snippets">
+                            <span>快速插入</span>
+                            {['镜头缓慢推近', '侧逆光，雨夜霓虹', '微表情特写', '电影质感，浅景深'].map((snippet) => (
+                              <button
+                                key={snippet}
+                                type="button"
+                                onClick={() => { const current = (scene.videoPrompt ?? '').trim().replace(/[，,。.；;、\s]+$/, ''); updateBreakdownScene(scene.id, { videoPrompt: [current, snippet].filter(Boolean).join('，') }) }}
+                              >{snippet}</button>
+                            ))}
+                          </div>
                           <textarea
                             id={`video-prompt-${scene.id}`}
                             className="video-prompt-textarea"
                             value={scene.videoPrompt ?? ''}
-                            placeholder="推理后会生成可直接用于视频模型的提示词，也可以在这里手动编辑…"
+                            placeholder="描述这一镜的主体、动作、镜头运动、光线与画面风格；可直接使用上方快速插入，或在右侧设置时长、画幅与分辨率后生成。"
                             maxLength={8000}
                             onChange={(event) => updateBreakdownScene(scene.id, { videoPrompt: event.target.value })}
                           />
+                          <div className="video-prompt-foot">
+                            <span>{(scene.videoPrompt ?? '').length} / 8000</span>
+                            <span>{videoOptions.duration}s · {videoOptions.aspectRatio} · {videoOptions.resolution}</span>
+                          </div>
                         </div>
                         <section className="scene-assets">
-                          <div className="scene-assets-heading"><span><ImagePlus size={13} /> 引用资产</span><small>角色 / 道具</small></div>
+                          <div className="scene-assets-heading"><span><ImagePlus size={13} /> @引用资产</span><small>人物 / 场景 / 物品</small></div>
                           {availableReferences.length > 0 && <div className="scene-asset-options">
-                            {[...new Set(availableReferences)].map((reference) => <button
-                              key={reference}
+                            {availableReferences.map((asset) => <button
+                              key={('id' in asset ? asset.id : undefined) ?? `${asset.type}-${asset.name}`}
                               type="button"
-                              className={(scene.assetReferences ?? []).includes(reference) ? 'selected' : ''}
-                              onClick={() => toggleSceneAssetReference(scene, reference)}
-                            >{reference}</button>)}
+                              className={(scene.assetReferences ?? []).includes(asset.name) ? 'selected' : ''}
+                              onClick={() => 'id' in asset ? addAssetReference(scene, asset) : addSceneAssetReference(scene, asset.name)}
+                            >@{asset.name}</button>)}
                           </div>}
                           <div className="scene-asset-input-row">
                             <input
                               value={sceneReferenceDrafts[scene.id] ?? ''}
-                              placeholder="输入资产名称或图片链接"
+                              placeholder="输入 @资产名，或 HTTPS 参考图链接"
                               onChange={(event) => setSceneReferenceDrafts((current) => ({ ...current, [scene.id]: event.target.value }))}
                               onKeyDown={(event) => {
                                 if (event.key === 'Enter') {
                                   event.preventDefault()
-                                  addSceneAssetReference(scene, sceneReferenceDrafts[scene.id] ?? '')
+                                  const value = sceneReferenceDrafts[scene.id] ?? ''
+                                  const asset = projectAssets.find((item) => item.name.toLowerCase() === value.replace(/^@/, '').toLowerCase())
+                                  if (asset) addAssetReference(scene, asset)
+                                  else addSceneAssetReference(scene, value.replace(/^@/, ''))
                                 }
                               }}
                             />
-                            <button type="button" onClick={() => addSceneAssetReference(scene, sceneReferenceDrafts[scene.id] ?? '')}><Plus size={13} /> 添加</button>
+                            <button type="button" onClick={() => { const value = sceneReferenceDrafts[scene.id] ?? ''; const asset = projectAssets.find((item) => item.name.toLowerCase() === value.replace(/^@/, '').toLowerCase()); if (asset) addAssetReference(scene, asset); else addSceneAssetReference(scene, value.replace(/^@/, '')) }}><Plus size={13} /> 添加</button>
                           </div>
                           {(scene.assetReferences ?? []).length > 0
                             ? <div className="scene-asset-chips">{scene.assetReferences?.map((reference) => <button key={reference} type="button" onClick={() => toggleSceneAssetReference(scene, reference)} title="移除引用"> {reference} <span>×</span></button>)}</div>
-                            : <p className="scene-assets-empty">尚未引用资产；可从角色/道具中选择，或手动添加名称和图片链接。</p>}
+                            : <p className="scene-assets-empty">选择资产会将 @名称 插入提示词；提交视频时会展开对应资产描述。</p>}
                         </section>
                         {editingSceneIds.includes(scene.id) ? <>
                           <input
@@ -1363,8 +1810,14 @@ function App() {
                               [scene.id]: { ...videoOptions, aspectRatio: event.target.value },
                             }))}
                           >{['16:9', '9:16'].map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}</select></label>
+                          <label>分辨率<select
+                            value={videoOptions.resolution}
+                            onChange={(event) => setVideoGenerationOptions((current) => ({
+                              ...current,
+                              [scene.id]: { ...videoOptions, resolution: event.target.value },
+                            }))}
+                          >{['480p', '720p', '1080p'].map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}</select></label>
                         </div>
-                        <p className="video-billing-note">Muse Video 输出 720p，支持文生视频或单张参考图；服务商按秒计费，本站不扣积分。</p>
                         {scene.videoTaskId && <div className={`video-task-status status-${scene.videoStatus ?? 'pending'}`}>
                           <span>{videoStatusLabels[scene.videoStatus ?? 'pending']}{scene.videoProgress ? ` · ${scene.videoProgress}` : ''}</span>
                           <button
@@ -1400,6 +1853,8 @@ function App() {
                     </table></div>
                   </section>
                 })}
+                  </div>
+                </div>
               </section>
             ) : <section className="tool-view script-editor-view">
               <div className="tool-view-head"><div className="tool-kicker">SCRIPT TO STORYBOARD / 01</div><h2>让故事，长出画面。</h2><p>剧本内容和生成的分镜已独立保存，可随时从「短剧工坊」项目列表继续。</p></div>
@@ -1480,8 +1935,47 @@ function App() {
               </section>
               <div className="skills-callout"><Sparkles size={15} /><span>点击“推理分镜”后，系统会将所选 Skill、个人提示词模板和剧本发送给聊天模型进行推理；未配置聊天模型时不会进行本地替代拆分。</span></div>
             </section>
-          ) : activeNav === 'characters' ? (
-            <section className="tool-view character-view"><div className="tool-view-head"><div className="tool-kicker">CHARACTER DESIGN / 02</div><h2>让角色，有迹可循。</h2><p>沉淀角色的外形、性格与故事弧光，让每一帧都保持一致。</p></div><div className="character-card"><div className="character-portrait">晚</div><div><div className="character-tag">PROTAGONIST · 女主角</div><h3>林晚</h3><p>旧书店主理人。沉静敏锐，习惯把情绪藏进未说出口的话里。</p><div className="character-traits"><span>克制</span><span>敏锐</span><span>念旧</span></div></div><button className="outline-button" onClick={() => setNotice('角色设定编辑即将开放')}><SquarePen size={14} /> 编辑设定</button></div><button className="add-character" onClick={() => setNotice('新角色画布已准备就绪')}><Plus size={18} /> 添加角色</button></section>
+          ) : activeNav === 'assets' ? (
+            <section className="tool-view asset-library-view">
+              <div className="asset-library-heading">
+                <div className="tool-view-head"><div className="tool-kicker">CREATIVE ASSETS / LIBRARY</div><h2>创作资产，一处管理。</h2><p>汇集剧本推理生成的角色设定、场景信息和已生成视频。</p></div>
+                <div className="asset-library-actions"><button type="button" className="outline-button" onClick={addManualAsset}><Plus size={14} /> 新增资产</button><div className="asset-category-tabs" role="tablist" aria-label="资产类型">
+                  <button type="button" role="tab" aria-selected={assetCategory === 'characters'} className={assetCategory === 'characters' ? 'active' : ''} onClick={() => setAssetCategory('characters')}><UserRound size={15} /> 角色资产</button>
+                  <button type="button" role="tab" aria-selected={assetCategory === 'scenes'} className={assetCategory === 'scenes' ? 'active' : ''} onClick={() => setAssetCategory('scenes')}><MapPin size={15} /> 场景资产</button>
+                  <button type="button" role="tab" aria-selected={assetCategory === 'props'} className={assetCategory === 'props' ? 'active' : ''} onClick={() => setAssetCategory('props')}><Package size={15} /> 物品资产</button>
+                  <button type="button" role="tab" aria-selected={assetCategory === 'videos'} className={assetCategory === 'videos' ? 'active' : ''} onClick={() => setAssetCategory('videos')}><Video size={15} /> 视频资产</button>
+                </div></div>
+              </div>
+              {projectAssets.filter((asset) => asset.type === (assetCategory === 'characters' ? 'character' : assetCategory === 'scenes' ? 'scene' : 'prop')).length > 0 && assetCategory !== 'videos' && <div className="asset-card-grid asset-edit-grid">
+                {projectAssets.filter((asset) => asset.type === (assetCategory === 'characters' ? 'character' : assetCategory === 'scenes' ? 'scene' : 'prop')).map((asset) => <article className="asset-library-card" key={asset.id}>
+                  <div className="asset-card-icon">{asset.mediaUrl ? asset.mediaType === 'video' ? <video className="asset-card-thumb" src={asset.mediaUrl} muted preload="metadata" /> : <img className="asset-card-thumb" src={asset.mediaUrl} alt="" /> : asset.type === 'character' ? <UserRound size={19} /> : asset.type === 'scene' ? <MapPin size={19} /> : <Package size={19} />}</div>
+                  <div className="asset-card-content"><span className="asset-card-source">{project.title} · 可在分镜中 @引用</span>
+                    <input className="asset-name-input" aria-label="资产名称" value={asset.name} onChange={(event) => updateAsset(asset.id, { name: event.target.value })} />
+                    <textarea className="asset-prompt-input" aria-label="资产提示词" value={asset.prompt} placeholder="填写供视频模型使用的外观、风格或场景提示词" onChange={(event) => updateAsset(asset.id, { prompt: event.target.value })} />
+                    <div className="asset-media-row"><label className="asset-media-button"><ImagePlus size={13} />{asset.mediaUrl ? '更换媒体' : '上传图片/视频'}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime" onChange={(event) => handleAssetMediaChange(asset.id, event)} /></label>{asset.mediaName && <span title={asset.mediaName}>{asset.mediaName}</span>}</div>
+                    <button type="button" className="asset-use-button" onClick={() => { setActiveNav('script'); setScriptView('breakdown'); setNotice(`在分镜提示词中输入 @${asset.name} 即可引用`) }}>复制引用名：@{asset.name}</button>
+                  </div>
+                </article>)}
+              </div>}
+              {assetCategory === 'characters' && <div className="asset-card-grid">
+                {characterAssets.map((asset) => <article className="asset-library-card asset-visual-card" key={asset.id}>
+                  <div className="asset-visual-media">{asset.media?.mediaUrl ? asset.media.mediaType === 'video' ? <video src={asset.media.mediaUrl} muted controls preload="metadata" /> : <img src={asset.media.mediaUrl} alt={asset.name} /> : <><UserRound size={28} /><label><ImagePlus size={12} />上传图片<input type="file" accept="image/*,video/*" onChange={(event) => handleLibraryMediaChange(asset.name, 'character', event)} /></label></>}</div>
+                  <div className="asset-card-content"><span className="asset-card-source">{asset.projectTitle}</span><h3>{asset.name}</h3><p>{asset.details.find(([key]) => /description|描述|外貌|appearance/i.test(key))?.[1] ?? '角色资产，可上传参考图片或视频。'}</p><button type="button" className="asset-use-button" onClick={() => { setActiveNav('script'); setScriptView('breakdown'); setNotice(`在分镜提示词中输入 @${asset.name} 即可引用`) }}>@{asset.name}</button></div>
+                </article>)}
+                {characterAssets.length === 0 && <div className="asset-library-empty"><UserRound size={22} /><h3>还没有角色资产</h3><p>在短剧工坊推理剧本后，模型生成的角色设定会汇集到这里。</p><button className="outline-button" onClick={() => navigateTo('script')}><FileText size={14} /> 前往短剧工坊</button></div>}
+              </div>}
+              {assetCategory === 'scenes' && <div className="asset-card-grid">
+                {sceneAssets.map((asset) => <article className="asset-library-card asset-visual-card scene-asset-card" key={asset.id}>
+                  <div className="asset-visual-media">{asset.media?.mediaUrl ? asset.media.mediaType === 'video' ? <video src={asset.media.mediaUrl} muted controls preload="metadata" /> : <img src={asset.media.mediaUrl} alt={asset.name} /> : <><MapPin size={28} /><label><ImagePlus size={12} />上传图片<input type="file" accept="image/*,video/*" onChange={(event) => handleLibraryMediaChange(asset.name, 'scene', event)} /></label></>}</div><div className="asset-card-content"><span className="asset-card-source">{asset.projectTitle}</span><h3>{asset.name}</h3>{asset.time && <span className="scene-asset-time">{asset.time}</span>}<p>{asset.description}</p></div>
+                </article>)}
+                {sceneAssets.length === 0 && <div className="asset-library-empty"><MapPin size={22} /><h3>还没有场景资产</h3><p>创建画布或短剧项目后，场景信息会显示在这里。</p><button className="outline-button" onClick={() => navigateTo('home')}><Plus size={14} /> 开始创作</button></div>}
+              </div>}
+              {assetCategory === 'props' && <div className="asset-card-grid">{propAssets.map((asset) => <article className="asset-library-card asset-visual-card" key={asset.id}><div className="asset-visual-media">{asset.media?.mediaUrl ? asset.media.mediaType === 'video' ? <video src={asset.media.mediaUrl} muted controls preload="metadata" /> : <img src={asset.media.mediaUrl} alt={asset.name} /> : <><Package size={28} /><label><ImagePlus size={12} />上传图片<input type="file" accept="image/*,video/*" onChange={(event) => handleLibraryMediaChange(asset.name, 'prop', event)} /></label></>}</div><div className="asset-card-content"><span className="asset-card-source">{asset.projectTitle}</span><h3>{asset.name}</h3><p>{asset.description || '物品资产，可上传参考图片或视频。'}</p></div></article>)}{propAssets.length === 0 && <div className="asset-library-empty"><Package size={22} /><h3>物品资产</h3><p>推理分镜生成的物品设定会汇集到这里，并可编辑成统一提示词。</p><button className="outline-button" onClick={() => navigateTo('script')}><FileText size={14} /> 前往短剧工坊</button></div>}</div>}
+              {assetCategory === 'videos' && <div className="asset-card-grid video-asset-grid">
+                {videoAssets.map((asset) => <article className="asset-library-card video-asset-card" key={asset.id}><video src={asset.videoUrl} controls preload="metadata" /><div className="asset-card-content"><span className="asset-card-source">{asset.projectTitle}</span><h3>{asset.name}</h3></div></article>)}
+                {videoAssets.length === 0 && <div className="asset-library-empty"><Video size={22} /><h3>还没有视频资产</h3><p>生成并保存的视频会自动收录在这里。</p><button className="outline-button" onClick={() => navigateTo('script')}><Film size={14} /> 前往短剧工坊</button></div>}
+              </div>}
+            </section>
           ) : activeNav === 'settings' ? (
             <section className="tool-view settings-view">
               <div className="tool-view-head"><div className="tool-kicker">YOUR ACCOUNT / SETTINGS</div><h2>创作，由你掌控。</h2><p>管理个人资料、创作积分与大模型服务连接。</p></div>
@@ -1490,6 +1984,7 @@ function App() {
                   <button className={settingsTab === 'profile' ? 'active' : ''} onClick={() => setSettingsTab('profile')}><UserRound size={15} /> 个人资料</button>
                   <button className={settingsTab === 'credits' ? 'active' : ''} onClick={() => setSettingsTab('credits')}><Coins size={15} /> 积分与充值</button>
                   <button className={settingsTab === 'model' ? 'active' : ''} onClick={() => setSettingsTab('model')}><Cpu size={15} /> 大模型 API</button>
+                  <button className={settingsTab === 'appearance' ? 'active' : ''} onClick={() => setSettingsTab('appearance')}><Palette size={15} /> 外观设置</button>
                 </nav>
                 <div className="settings-panel">
                   {settingsError && <div className="settings-error"><CircleHelp size={14} />{settingsError}<button onClick={() => setSettingsError('')}>×</button></div>}
@@ -1531,10 +2026,18 @@ function App() {
                       <div className="model-form-footer"><span>{modelKind === 'chat'
                         ? '推理分镜使用聊天模型：每次成功调用消耗 5 积分。'
                         : modelKind === 'video'
-                          ? 'Muse Video：模型名 muse-video；720p、4–30 秒、16:9/9:16，服务商按秒计费，本站不扣视频积分。'
+                          ? 'Muse Video：模型名 muse-video；4–30 秒、16:9/9:16，可选 480p / 720p / 1080p，服务商按秒计费，本站不扣视频积分。'
                           : '此处保存该类型模型连接配置；对应生成能力需由工具单独接入。'}</span><div><button className="outline-button" type="button" onClick={testModelConnection} disabled={modelTestBusy || !modelKeyHint}>{modelTestBusy ? '测试中…' : '测试连接'}</button><button className="generate-button" type="submit" disabled={modelBusy}>{modelBusy ? '保存中…' : '保存配置'}</button></div></div>
                     </form>
                     {modelKeyHint && <button className="remove-model" onClick={clearModelSettings}>移除{modelKindLabels[modelKind]}配置</button>}
+                  </div>}
+                  {settingsTab === 'appearance' && <div className="settings-section appearance-settings-section">
+                    <div className="settings-section-heading"><div><h3>外观设置</h3><p>调整创作工作台的视觉风格，设置只保存在当前浏览器。</p></div><span className="settings-badge connected"><Palette size={12} />即时预览</span></div>
+                    <div className="appearance-setting-group"><span>主题</span><div className="appearance-segmented"><button className={frontTheme === 'dark' ? 'active' : ''} onClick={() => setFrontTheme('dark')}>深色</button><button className={frontTheme === 'light' ? 'active' : ''} onClick={() => setFrontTheme('light')}>浅色</button></div></div>
+                    <div className="appearance-setting-group"><span>强调色</span><div className="appearance-colors">{['#d3ef86', '#8cd8c7', '#d9a7ff', '#ffae7a'].map((color) => <button key={color} className={frontAccent === color ? 'active' : ''} style={{ background: color }} onClick={() => setFrontAccent(color)} aria-label="选择强调色" />)}</div></div>
+                    <div className="appearance-setting-group"><span>信息密度</span><div className="appearance-segmented"><button className={frontDensity === 'comfortable' ? 'active' : ''} onClick={() => setFrontDensity('comfortable')}>舒展</button><button className={frontDensity === 'compact' ? 'active' : ''} onClick={() => setFrontDensity('compact')}>紧凑</button></div></div>
+                    <div className="appearance-setting-group"><span>圆角风格</span><div className="appearance-segmented"><button className={frontRadius === 'soft' ? 'active' : ''} onClick={() => setFrontRadius('soft')}>柔和</button><button className={frontRadius === 'sharp' ? 'active' : ''} onClick={() => setFrontRadius('sharp')}>利落</button></div></div>
+                    <div className="appearance-preview"><div className="appearance-preview-top"><i /><i /><i /></div><div className="appearance-preview-body"><span /><b /><em /></div><small>当前工作台预览</small></div>
                   </div>}
                 </div>
               </div>
@@ -1547,14 +2050,21 @@ function App() {
           ) : (
             <div className="editor-layout">
               <section className="canvas-wrap" ref={canvasRef} onPointerDown={handleCanvasPointerDown} onPointerMove={handlePointerMove} onPointerUp={() => { dragRef.current = null }} onPointerCancel={() => { dragRef.current = null }} onWheel={handleWheel}>
-                <div className="canvas-grid" />
+                <div className={`canvas-grid ${showGrid ? '' : 'grid-hidden'}`} />
                 <div className="canvas-world" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}>
                   <svg className="connections" width="1600" height="1000" aria-hidden="true">
-                    <path d="M 458 330 C 515 330, 515 260, 570 260" />
-                    <path d="M 458 380 C 520 380, 510 620, 570 620" />
-                    <path d="M 878 260 C 942 260, 942 405, 1000 405" />
-                    <path d="M 878 620 C 952 620, 933 450, 1000 450" />
-                    <circle cx="570" cy="260" r="3" /><circle cx="570" cy="620" r="3" /><circle cx="1000" cy="405" r="3" />
+                    {showConnections && project.scenes.slice(0, -1).map((scene, index) => {
+                      const next = project.scenes[index + 1]
+                      const startX = scene.x + 308
+                      const startY = scene.y + 96
+                      const endX = next.x
+                      const endY = next.y + 96
+                      const bend = Math.max(48, Math.abs(endX - startX) * 0.35)
+                      return <g key={`${scene.id}-${next.id}`}>
+                        <path d={`M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`} />
+                        <circle cx={endX} cy={endY} r="2.5" />
+                      </g>
+                    })}
                   </svg>
                   {project.scenes.map((scene, index) => (
                     <article
@@ -1567,7 +2077,7 @@ function App() {
                         <div className="art-orb" /><div className="art-horizon" /><div className="art-foreground" />
                         <span className="art-index">SCENE {String(index + 1).padStart(2, '0')}</span>
                         <span className="art-caption">{artTitles[scene.art] || 'Frame / 05'}</span>
-                        <button className="card-more" title="更多操作"><MoreHorizontal size={16} /></button>
+                        <button className="card-more" title="打开分镜检查器" onClick={() => { setSelectedId(scene.id); setPanelOpen(true) }}><MoreHorizontal size={16} /></button>
                       </div>
                       <div className="scene-content">
                         <div className="scene-label"><span style={{ background: `var(--${scene.color})` }} /> 场景 {String(index + 1).padStart(2, '0')} <span className="scene-time">{scene.time}</span></div>
@@ -1582,20 +2092,20 @@ function App() {
                 </div>
                 <div className="canvas-hint"><span className="hint-key">SPACE</span> 拖动画布 <i /> 滚轮缩放</div>
                 <div className="zoom-control"><button title="缩小" onClick={() => setZoom((current) => Math.max(0.48, current - 0.08))}><ZoomOut size={15} /></button><span>{Math.round(zoom * 100)}%</span><button title="放大" onClick={() => setZoom((current) => Math.min(1.35, current + 0.08))}><ZoomIn size={15} /></button></div>
-                <div className="mini-map"><span className="mini-map-label">OVERVIEW</span><div className="mini-map-content"><i /><i /><i /><i /></div></div>
+                <div className="mini-map"><span className="mini-map-label">OVERVIEW</span><div className="mini-map-content">{project.scenes.map((scene) => <i key={scene.id} className={selectedId === scene.id ? 'active' : ''} style={{ left: `${(scene.x / 1600) * 100}%`, top: `${(scene.y / 1000) * 100}%` }} />)}{project.scenes.length === 0 && <span className="mini-map-empty">EMPTY</span>}</div></div>
               </section>
               {panelOpen ? <aside className="inspector">
-                <div className="inspector-head"><div><span className="inspector-kicker">FRAME INSPECTOR</span><h2>分镜详情 <span>{selectedScene ? `01 / ${String(project.scenes.length).padStart(2, '0')}` : '—'}</span></h2></div><button className="panel-close" onClick={() => setPanelOpen(false)} title="收起面板"><PanelRightClose size={16} /></button></div>
+                <div className="inspector-head"><div><span className="inspector-kicker">FRAME INSPECTOR</span><h2>分镜详情 {selectedScene && <span>{`${String(project.scenes.findIndex((scene) => scene.id === selectedScene.id) + 1).padStart(2, '0')} / ${String(project.scenes.length).padStart(2, '0')}`}</span>}</h2></div><button className="panel-close" onClick={() => setPanelOpen(false)} title="收起面板"><PanelRightClose size={16} /></button></div>
                 {selectedScene ? <div className="inspector-scroll">
-                  <div className={`inspector-preview art-${selectedScene.art}`}><div className="art-orb" /><div className="art-horizon" /><div className="art-foreground" /><span className="preview-overlay"><span>分镜预览</span><button title="更换画面"><ImagePlus size={15} /></button></span><span className="preview-number">FRAME / 0{project.scenes.findIndex((scene) => scene.id === selectedScene.id) + 1}</span></div>
+                  <div className={`inspector-preview art-${selectedScene.art}`}><div className="art-orb" /><div className="art-horizon" /><div className="art-foreground" /><span className="preview-overlay"><span>分镜预览</span><button title="切换画面风格" onClick={() => { const styles = Object.keys(artTitles); const next = styles[(styles.indexOf(selectedScene.art) + 1) % styles.length]; updateSelected('art', next); setNotice('画面风格已切换') }}><ImagePlus size={15} /></button></span><span className="preview-number">FRAME / {String(project.scenes.findIndex((scene) => scene.id === selectedScene.id) + 1).padStart(2, '0')}</span></div>
                   <label className="field-label">分镜标题</label><input className="field-input title-input" value={selectedScene.title} onChange={(event) => updateSelected('title', event.target.value)} />
                   <label className="field-label">画面描述 <button className="inline-ai" onClick={() => setNotice('文案润色需要接入 AI 服务，当前可直接编辑画面描述')}><Sparkles size={12} /> AI 润色</button></label>
                   <textarea className="field-textarea" value={selectedScene.description} onChange={(event) => updateSelected('description', event.target.value)} />
                   <div className="field-row"><div><label className="field-label">场景地点</label><input className="field-input" value={selectedScene.location} onChange={(event) => updateSelected('location', event.target.value)} /></div><div><label className="field-label">时间氛围</label><input className="field-input" value={selectedScene.time} onChange={(event) => updateSelected('time', event.target.value)} /></div></div>
                   <label className="field-label">镜头情绪</label><div className="mood-tags">{['悬念', '克制', '温柔', '不安'].map((mood) => <button key={mood} className={selectedScene.mood.includes(mood) ? 'mood-active' : ''} onClick={() => updateSelected('mood', mood)}>{mood}</button>)}</div>
-                  <div className="inspector-section"><div className="section-title"><span>镜头语言</span><button><MoreHorizontal size={15} /></button></div><div className="shot-select"><Clapperboard size={14} /><span>{selectedScene.shot}</span><ChevronDown size={13} /></div></div>
+                  <div className="inspector-section"><div className="section-title"><span>镜头语言</span><button title="切换镜头语言" onClick={() => { const shots = ['特写', '近景', '中景', '全景', '远景']; const next = shots[(shots.indexOf(selectedScene.shot) + 1) % shots.length]; updateSelected('shot', next) }}><MoreHorizontal size={15} /></button></div><div className="shot-select"><Clapperboard size={14} /><span>{selectedScene.shot}</span><ChevronDown size={13} /></div></div>
                   <button className="prompt-button" onClick={createImagePrompt}><WandSparkles size={15} /><span>生成画面提示词</span><ArrowRight size={14} /></button>
-                  <div className="inspector-bottom"><span><Check size={12} /> 自动保存中</span><button title="复制分镜"><Copy size={14} /></button><button title="评论"><MessageSquare size={14} /></button><button title="删除分镜" onClick={() => { if (project.scenes.length > 1) { const remaining = project.scenes.filter((scene) => scene.id !== selectedScene.id); updateProject((current) => ({ ...current, scenes: remaining })); setSelectedId(remaining[0].id) } else setNotice('至少需要保留一个分镜') }}><MoreHorizontal size={15} /></button></div>
+                  <div className="inspector-bottom"><span><Check size={12} /> {saved ? '已自动保存' : '保存中…'}</span><button title="复制分镜文案" onClick={() => { navigator.clipboard?.writeText(`${selectedScene.title}\n${selectedScene.description}\n场景：${selectedScene.location}｜${selectedScene.time}\n情绪：${selectedScene.mood}｜镜头：${selectedScene.shot}`); setNotice('分镜文案已复制') }}><Copy size={14} /></button><button title="生成画面提示词" onClick={createImagePrompt}><WandSparkles size={14} /></button><button title="删除分镜" onClick={() => { if (project.scenes.length > 1) { const remaining = project.scenes.filter((scene) => scene.id !== selectedScene.id); updateProject((current) => ({ ...current, scenes: remaining })); setSelectedId(remaining[0].id); setNotice('分镜已删除') } else setNotice('至少需要保留一个分镜') }}><Trash2 size={14} /></button></div>
                 </div> : <div className="inspector-empty"><Frame size={20} /><span>选择或新建一个分镜节点</span></div>}
               </aside> : <button className="reopen-panel" onClick={() => setPanelOpen(true)}><ChevronLeft size={16} /> 分镜详情</button>}
             </div>
@@ -1603,7 +2113,39 @@ function App() {
         </main>
       </div>
       {isProjectEditor && project.projectType === 'canvas' && <button className="add-scene-fab" onClick={addScene}><Plus size={16} /> 新建分镜</button>}
-      {notice && <div className="toast"><span className="toast-mark"><Check size={14} /></span>{notice}<button onClick={() => setNotice('')}>×</button></div>}
+      {notice && <div className={`toast ${noticeIsError ? 'toast-error' : ''}`} role="status"><span className="toast-mark">{noticeIsError ? <CircleHelp size={14} /> : <Check size={14} />}</span>{notice}<button onClick={() => setNotice('')} aria-label="关闭提示">×</button></div>}
+      {paletteOpen && <div className="modal-backdrop palette-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPaletteOpen(false) }}>
+        <section className="command-palette" role="dialog" aria-modal="true" aria-label="快速搜索">
+          <div className="palette-input">
+            <Search size={17} />
+            <input
+              autoFocus
+              value={paletteQuery}
+              onChange={(event) => { setPaletteQuery(event.target.value); setPaletteCursor(0) }}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowDown') { event.preventDefault(); setPaletteCursor((cursor) => Math.min(cursor + 1, paletteResults.length - 1)) }
+                if (event.key === 'ArrowUp') { event.preventDefault(); setPaletteCursor((cursor) => Math.max(cursor - 1, 0)) }
+                if (event.key === 'Enter') { event.preventDefault(); const target = paletteResults[paletteCursor]; if (target) { setPaletteOpen(false); setPaletteQuery(''); target.run() } }
+              }}
+              placeholder="搜索项目、页面或操作…"
+              aria-label="搜索项目、页面或操作"
+            />
+            <kbd>ESC</kbd>
+          </div>
+          <div className="palette-results">
+            {paletteResults.map((item, index) => {
+              const Icon = item.icon
+              return <button key={item.id} className={index === paletteCursor ? 'active' : ''} onMouseEnter={() => setPaletteCursor(index)} onClick={() => { setPaletteOpen(false); setPaletteQuery(''); item.run() }}>
+                <span className="palette-icon"><Icon size={15} /></span>
+                <span><b>{item.label}</b><small>{item.hint}</small></span>
+                <ArrowRight size={13} />
+              </button>
+            })}
+            {paletteResults.length === 0 && <div className="palette-empty"><Search size={18} /><b>没有找到相关内容</b><span>试试项目名称、页面名或「新建」</span></div>}
+          </div>
+          <div className="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span><span><kbd>⌘K</kbd> 随时唤出</span></div>
+        </section>
+      </div>}
       {expandedVideoPromptScene && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setExpandedVideoPromptSceneId(null) }}>
         <section className="video-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="video-prompt-modal-title">
           <div className="modal-kicker">VIDEO PROMPT / SCENE {String(project.scenes.findIndex((scene) => scene.id === expandedVideoPromptScene.id) + 1).padStart(2, '0')}</div>

@@ -8,6 +8,7 @@ import { isIP } from 'node:net'
 import { promisify } from 'node:util'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildObservabilitySnapshot } from './observability.js'
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
@@ -34,6 +35,7 @@ const scrypt = promisify(scryptCallback)
 const sessionDuration = 7 * 24 * 60 * 60 * 1000
 const sessionCookie = 'mo_session'
 const modelKinds = ['chat', 'image', 'video', 'audio']
+const modelKindLabels = { chat: '聊天模型', image: '图片模型', video: '视频模型', audio: '音频模型' }
 const builtInSkillIds = new Set(['storyboard', 'cinematic', 'short-form', 'character'])
 const mockPackages = {
   starter: { credits: 100, label: '体验包' },
@@ -46,6 +48,19 @@ const maxUsageSubscribers = 20
 const modelGenerationTimeoutMs = 120000
 let writeQueue = Promise.resolve()
 
+const showcaseArtStyles = ['art-rain', 'art-glass', 'art-letter', 'art-alley']
+const showcaseVideoStyles = ['video-rain', 'video-dawn', 'video-alley']
+
+function defaultShowcase() {
+  return [
+    { id: 'showcase-rain', kind: 'image', title: '雨停之前', caption: '雾山来信 · Frame 01', tag: '雨夜', art: 'art-rain', order: 1, visible: true, createdAt: new Date('2026-10-01T00:00:00.000Z').toISOString() },
+    { id: 'showcase-glass', kind: 'image', title: '玻璃另一侧', caption: '无声告白 · Frame 08', tag: '重逢', art: 'art-glass', order: 2, visible: true, createdAt: new Date('2026-10-02T00:00:00.000Z').toISOString() },
+    { id: 'showcase-letter', kind: 'image', title: '被遗忘的信', caption: '十年以后 · Frame 03', tag: '回忆', art: 'art-letter', order: 3, visible: true, createdAt: new Date('2026-10-03T00:00:00.000Z').toISOString() },
+    { id: 'showcase-rain-video', kind: 'video', title: '山城雨夜', caption: '雾山来信 · 预告片', duration: '00:38', art: 'video-rain', order: 4, visible: true, createdAt: new Date('2026-10-04T00:00:00.000Z').toISOString() },
+    { id: 'showcase-dawn-video', kind: 'video', title: '天亮之后', caption: '写给明天 · 第 01 集', duration: '01:12', art: 'video-dawn', order: 5, visible: true, createdAt: new Date('2026-10-05T00:00:00.000Z').toISOString() },
+  ]
+}
+
 async function loadStore() {
   try {
     const stored = JSON.parse(await readFile(storeFile, 'utf8'))
@@ -57,10 +72,13 @@ async function loadStore() {
       }) : [],
       transactions: Array.isArray(stored.transactions) ? stored.transactions : [],
       sessions: Array.isArray(stored.sessions) ? stored.sessions : [],
+      modelProviders: Array.isArray(stored.modelProviders) ? stored.modelProviders : [],
+      auditLogs: Array.isArray(stored.auditLogs) ? stored.auditLogs : [],
+      showcase: Array.isArray(stored.showcase) ? stored.showcase : defaultShowcase(),
     }
   } catch (error) {
     if (error.code !== 'ENOENT') throw error
-    return { users: [], transactions: [], sessions: [] }
+    return { users: [], transactions: [], sessions: [], modelProviders: [], auditLogs: [], showcase: defaultShowcase() }
   }
 }
 
@@ -144,6 +162,7 @@ function authRequired(request, response, next) {
   }
   const user = store.users.find((candidate) => candidate.id === session.userId)
   if (!user) return response.status(401).json({ error: '登录已失效，请重新登录' })
+  if (user.active === false) return response.status(403).json({ error: '账号已被冻结，请联系管理员' })
   request.user = user
   next()
 }
@@ -158,6 +177,14 @@ function adminRequired(request, response, next) {
     return response.status(403).json({ error: '当前账号没有后台访问权限' })
   }
   next()
+}
+
+function addAuditLog(admin, action, target, details = '') {
+  store.auditLogs.unshift({
+    id: randomUUID(), adminId: admin.id, adminEmail: admin.email, action, target, details,
+    createdAt: new Date().toISOString(),
+  })
+  store.auditLogs = store.auditLogs.slice(0, 1000)
 }
 
 async function issueSession(user, response) {
@@ -188,6 +215,10 @@ function addTransaction(user, { type, amount, description }) {
   return transaction
 }
 
+function addEvent(user, { type, description }) {
+  return addTransaction(user, { type, amount: 0, description })
+}
+
 function monitoringRequired(request, response, next) {
   const configuredToken = process.env.OBSERVABILITY_TOKEN
   if (!configuredToken || configuredToken.length < 32) {
@@ -206,6 +237,7 @@ function monitoringRequired(request, response, next) {
 function usagePayload(transaction, user) {
   return {
     id: transaction.id,
+    type: transaction.type,
     userId: user.id,
     username: user.username ?? user.email,
     email: user.email,
@@ -219,75 +251,7 @@ function usagePayload(transaction, user) {
 }
 
 function getUsageSnapshot(windowName) {
-  const windowOptions = {
-    '1h': { durationMs: 60 * 60 * 1000, bucketMs: 60 * 1000 },
-    '24h': { durationMs: 24 * 60 * 60 * 1000, bucketMs: 15 * 60 * 1000 },
-    '7d': { durationMs: 7 * 24 * 60 * 60 * 1000, bucketMs: 60 * 60 * 1000 },
-    '30d': { durationMs: 30 * 24 * 60 * 60 * 1000, bucketMs: 6 * 60 * 60 * 1000 },
-  }
-  const { durationMs, bucketMs } = windowOptions[windowName]
-  const now = Date.now()
-  const windowStart = now - durationMs
-  const usersById = new Map(store.users.map((user) => [user.id, user]))
-  const transactions = store.transactions.filter((transaction) => {
-    if (transaction.type !== 'usage') return false
-    const time = Date.parse(transaction.createdAt)
-    return Number.isFinite(time) && time >= windowStart && time <= now
-  })
-  const userUsage = new Map()
-  const bucketCount = Math.ceil(durationMs / bucketMs)
-  const buckets = Array.from({ length: bucketCount }, (_, index) => ({
-    timestamp: new Date(windowStart + index * bucketMs).toISOString(),
-    requests: 0,
-    creditsConsumed: 0,
-  }))
-  for (const transaction of transactions) {
-    const user = usersById.get(transaction.userId)
-    if (!user) continue
-    const amount = Math.abs(transaction.amount)
-    const summary = userUsage.get(user.id) ?? { user, requests: 0, creditsConsumed: 0, lastUsedAt: transaction.createdAt }
-    summary.requests += 1
-    summary.creditsConsumed += amount
-    if (Date.parse(transaction.createdAt) > Date.parse(summary.lastUsedAt)) summary.lastUsedAt = transaction.createdAt
-    userUsage.set(user.id, summary)
-    const bucketIndex = Math.floor((Date.parse(transaction.createdAt) - windowStart) / bucketMs)
-    if (buckets[bucketIndex]) {
-      buckets[bucketIndex].requests += 1
-      buckets[bucketIndex].creditsConsumed += amount
-    }
-  }
-  const byUser = [...userUsage.values()]
-    .map(({ user, requests, creditsConsumed, lastUsedAt }) => ({
-      userId: user.id,
-      username: user.username ?? user.email,
-      email: user.email,
-      name: user.name,
-      credits: user.credits,
-      model: modelConfigFor(user, 'chat') ? { provider: modelConfigFor(user, 'chat').provider, name: modelConfigFor(user, 'chat').model } : null,
-      requests,
-      creditsConsumed,
-      lastUsedAt,
-    }))
-    .sort((left, right) => right.creditsConsumed - left.creditsConsumed)
-  const recentEvents = transactions.slice(0, 100).flatMap((transaction) => {
-    const user = usersById.get(transaction.userId)
-    return user ? [usagePayload(transaction, user)] : []
-  })
-
-  return {
-    generatedAt: new Date(now).toISOString(),
-    window: windowName,
-    totals: {
-      users: store.users.length,
-      activeUsers: byUser.length,
-      configuredModels: store.users.filter((user) => modelKinds.some((kind) => Boolean(modelConfigFor(user, kind)))).length,
-      requests: transactions.length,
-      creditsConsumed: transactions.reduce((sum, transaction) => sum + Math.abs(transaction.amount), 0),
-    },
-    byUser,
-    series: buckets,
-    recentEvents,
-  }
+  return buildObservabilitySnapshot({ users: store.users, transactions: store.transactions, windowName, modelConfigFor })
 }
 
 function writeSse(response, eventName, payload, eventId) {
@@ -636,7 +600,7 @@ app.use('/api', (request, response, next) => {
   if (request.method === 'OPTIONS') return response.sendStatus(204)
   next()
 })
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit: '8mb' }))
 
 app.get('/api/health', (_request, response) => {
   response.json({ status: 'ok' })
@@ -705,6 +669,7 @@ app.post('/api/auth/register', rateLimit, async (request, response, next) => {
     }
     store.users.push(user)
     addTransaction(user, { type: 'welcome', amount: 100, description: '新用户体验积分' })
+    addEvent(user, { type: 'user_registered', description: '新用户注册' })
     await persistStore()
     await issueSession(user, response)
     response.status(201).json(await accountResponse(user))
@@ -764,6 +729,203 @@ app.get('/api/admin/usage', authRequired, adminRequired, (request, response) => 
   }
   response.set('Cache-Control', 'no-store')
   response.json(getUsageSnapshot(windowName))
+})
+
+app.get('/api/admin/users', authRequired, adminRequired, (request, response) => {
+  const search = typeof request.query.search === 'string' ? request.query.search.trim().toLowerCase() : ''
+  const users = store.users
+    .filter((user) => !search || [user.username, user.email, user.name].some((value) => value?.toLowerCase().includes(search)))
+    .sort((left, right) => Date.parse(right.createdAt || 0) - Date.parse(left.createdAt || 0))
+    .map((user) => ({
+      id: user.id, username: user.username ?? user.email, email: user.email, name: user.name,
+      active: user.active !== false, credits: user.credits, createdAt: user.createdAt,
+      models: modelKinds.filter((kind) => Boolean(modelConfigFor(user, kind))),
+    }))
+  response.set('Cache-Control', 'no-store').json(users)
+})
+
+app.post('/api/admin/users', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const email = typeof request.body?.email === 'string' ? request.body.email.trim().toLowerCase() : ''
+    const password = typeof request.body?.password === 'string' ? request.body.password : ''
+    const name = typeof request.body?.name === 'string' ? request.body.name.trim().slice(0, 40) : ''
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return response.status(400).json({ error: '请输入有效的邮箱地址' })
+    if (password.length < 10 || password.length > 128) return response.status(400).json({ error: '密码长度需为 10–128 位' })
+    if (store.users.some((user) => user.email === email)) return response.status(409).json({ error: '该邮箱已注册' })
+    const passwordSalt = randomBytes(16).toString('hex')
+    const user = { id: randomUUID(), username: email, email, name: name || email.split('@')[0], passwordSalt, passwordHash: (await scrypt(password, passwordSalt, 64)).toString('hex'), credits: 100, createdAt: new Date().toISOString(), modelConfig: null, active: true }
+    store.users.push(user)
+    addTransaction(user, { type: 'welcome', amount: 100, description: '管理员创建账号体验积分' })
+    addAuditLog(request.user, 'user_created', user.email)
+    await persistStore()
+    response.status(201).json({ id: user.id })
+  } catch (error) { next(error) }
+})
+
+app.patch('/api/admin/users/:id', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const user = store.users.find((candidate) => candidate.id === request.params.id)
+    if (!user) return response.status(404).json({ error: '用户不存在' })
+    if (request.body?.active === false && user.id === request.user.id) return response.status(400).json({ error: '不能冻结当前登录管理员' })
+    if (request.body?.name !== undefined) {
+      const name = typeof request.body.name === 'string' ? request.body.name.trim() : ''
+      if (!name || name.length > 40) return response.status(400).json({ error: '昵称长度需为 1–40 个字符' })
+      user.name = name
+    }
+    if (request.body?.active !== undefined) user.active = request.body.active === true
+    addAuditLog(request.user, 'user_updated', user.email, `active=${user.active !== false}`)
+    await persistStore()
+    response.json({ saved: true })
+  } catch (error) { next(error) }
+})
+
+app.delete('/api/admin/users/:id', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const user = store.users.find((candidate) => candidate.id === request.params.id)
+    if (!user) return response.status(404).json({ error: '用户不存在' })
+    if (user.id === request.user.id) return response.status(400).json({ error: '不能删除当前登录管理员' })
+    user.active = false
+    for (const [tokenHash, session] of sessions) if (session.userId === user.id) sessions.delete(tokenHash)
+    store.sessions = store.sessions.filter((session) => session.userId !== user.id)
+    addAuditLog(request.user, 'user_deleted', user.email, 'soft_delete')
+    await persistStore()
+    response.json({ deleted: true })
+  } catch (error) { next(error) }
+})
+
+app.post('/api/admin/users/:id/reset-password', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const user = store.users.find((candidate) => candidate.id === request.params.id)
+    const password = typeof request.body?.password === 'string' ? request.body.password : ''
+    if (!user) return response.status(404).json({ error: '用户不存在' })
+    if (password.length < 10 || password.length > 128) return response.status(400).json({ error: '密码长度需为 10–128 位' })
+    user.passwordSalt = randomBytes(16).toString('hex')
+    user.passwordHash = (await scrypt(password, user.passwordSalt, 64)).toString('hex')
+    for (const [tokenHash, session] of sessions) if (session.userId === user.id) sessions.delete(tokenHash)
+    store.sessions = store.sessions.filter((session) => session.userId !== user.id)
+    addAuditLog(request.user, 'password_reset', user.email)
+    await persistStore()
+    response.json({ saved: true })
+  } catch (error) { next(error) }
+})
+
+app.get('/api/admin/models', authRequired, adminRequired, (request, response) => {
+  response.set('Cache-Control', 'no-store').json(store.modelProviders)
+})
+
+app.post('/api/admin/models', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const kind = request.body?.kind
+    const provider = typeof request.body?.provider === 'string' ? request.body.provider.trim().slice(0, 60) : ''
+    const model = typeof request.body?.model === 'string' ? request.body.model.trim().slice(0, 120) : ''
+    const baseUrl = validateModelBaseUrl(request.body?.baseUrl)
+    if (!isModelKind(kind) || !provider || !model) return response.status(400).json({ error: '请填写有效的模型类型、服务商和模型名称' })
+    const entry = { id: randomUUID(), kind, provider, model, baseUrl, enabled: true, createdAt: new Date().toISOString() }
+    store.modelProviders.unshift(entry)
+    addAuditLog(request.user, 'model_provider_created', `${provider}/${model}`, kind)
+    await persistStore()
+    response.status(201).json(entry)
+  } catch (error) { next(error) }
+})
+
+app.patch('/api/admin/models/:id', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const entry = store.modelProviders.find((candidate) => candidate.id === request.params.id)
+    if (!entry) return response.status(404).json({ error: '模型接入不存在' })
+    if (request.body?.enabled !== undefined) entry.enabled = request.body.enabled === true
+    addAuditLog(request.user, 'model_provider_updated', `${entry.provider}/${entry.model}`, `enabled=${entry.enabled}`)
+    await persistStore()
+    response.json(entry)
+  } catch (error) { next(error) }
+})
+
+function normalizeShowcaseArt(kind, art) {
+  const options = kind === 'video' ? showcaseVideoStyles : showcaseArtStyles
+  return options.includes(art) ? art : options[0]
+}
+
+function normalizeShowcaseUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  try {
+    const url = new URL(value.trim())
+    return ['http:', 'https:'].includes(url.protocol) ? url.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+app.get('/api/showcase', (request, response) => {
+  const items = store.showcase
+    .filter((item) => item.visible !== false)
+    .sort((left, right) => (left.order ?? 0) - (right.order ?? 0) || String(left.createdAt).localeCompare(String(right.createdAt)))
+  response.set('Cache-Control', 'no-store').json(items)
+})
+
+app.get('/api/admin/showcase', authRequired, adminRequired, (request, response) => {
+  const items = [...store.showcase].sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
+  response.set('Cache-Control', 'no-store').json(items)
+})
+
+app.post('/api/admin/showcase', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const kind = request.body?.kind === 'video' ? 'video' : 'image'
+    const title = typeof request.body?.title === 'string' ? request.body.title.trim().slice(0, 40) : ''
+    if (!title) return response.status(400).json({ error: '请填写作品标题' })
+    const highestOrder = store.showcase.reduce((max, item) => Math.max(max, Number(item.order) || 0), 0)
+    const entry = {
+      id: randomUUID(),
+      kind,
+      title,
+      caption: typeof request.body?.caption === 'string' ? request.body.caption.trim().slice(0, 80) : '',
+      art: normalizeShowcaseArt(kind, request.body?.art),
+      mediaUrl: normalizeShowcaseUrl(request.body?.mediaUrl) || undefined,
+      tag: kind === 'image' && typeof request.body?.tag === 'string' ? request.body.tag.trim().slice(0, 12) : undefined,
+      duration: kind === 'video' && typeof request.body?.duration === 'string' ? request.body.duration.trim().slice(0, 12) : undefined,
+      visible: request.body?.visible !== false,
+      order: Number.isFinite(Number(request.body?.order)) ? Number(request.body.order) : highestOrder + 1,
+      createdAt: new Date().toISOString(),
+    }
+    store.showcase.push(entry)
+    addAuditLog(request.user, 'showcase_created', title, kind)
+    await persistStore()
+    response.status(201).json(entry)
+  } catch (error) { next(error) }
+})
+
+app.patch('/api/admin/showcase/:id', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const entry = store.showcase.find((candidate) => candidate.id === request.params.id)
+    if (!entry) return response.status(404).json({ error: '展示作品不存在' })
+    const kind = request.body?.kind === 'video' ? 'video' : request.body?.kind === 'image' ? 'image' : entry.kind
+    if (kind !== entry.kind) entry.art = normalizeShowcaseArt(kind, entry.art)
+    entry.kind = kind
+    if (typeof request.body?.title === 'string' && request.body.title.trim()) entry.title = request.body.title.trim().slice(0, 40)
+    if (typeof request.body?.caption === 'string') entry.caption = request.body.caption.trim().slice(0, 80)
+    if (typeof request.body?.art === 'string') entry.art = normalizeShowcaseArt(kind, request.body.art)
+    if (request.body?.mediaUrl !== undefined) entry.mediaUrl = normalizeShowcaseUrl(request.body.mediaUrl) || undefined
+    if (kind === 'image' && typeof request.body?.tag === 'string') entry.tag = request.body.tag.trim().slice(0, 12)
+    if (kind === 'video' && typeof request.body?.duration === 'string') entry.duration = request.body.duration.trim().slice(0, 12)
+    if (request.body?.visible !== undefined) entry.visible = request.body.visible !== false
+    if (Number.isFinite(Number(request.body?.order))) entry.order = Number(request.body.order)
+    addAuditLog(request.user, 'showcase_updated', entry.title, `visible=${entry.visible !== false}`)
+    await persistStore()
+    response.json(entry)
+  } catch (error) { next(error) }
+})
+
+app.delete('/api/admin/showcase/:id', authRequired, adminRequired, async (request, response, next) => {
+  try {
+    const index = store.showcase.findIndex((candidate) => candidate.id === request.params.id)
+    if (index < 0) return response.status(404).json({ error: '展示作品不存在' })
+    const [entry] = store.showcase.splice(index, 1)
+    addAuditLog(request.user, 'showcase_deleted', entry.title, entry.kind)
+    await persistStore()
+    response.json({ deleted: true })
+  } catch (error) { next(error) }
+})
+
+app.get('/api/admin/audit', authRequired, adminRequired, (request, response) => {
+  response.set('Cache-Control', 'no-store').json(store.auditLogs.slice(0, 200))
 })
 
 app.patch('/api/account/profile', authRequired, async (request, response, next) => {
@@ -874,6 +1036,7 @@ app.put('/api/account/model', authRequired, async (request, response, next) => {
     if (request.body?.clear === true) {
       delete request.user.modelConfigs[kind]
       if (kind === 'chat') request.user.modelConfig = null
+      addEvent(request.user, { type: 'model_updated', description: `清除${modelKindLabels[kind]}配置` })
       await persistStore()
       return response.json({ model: null, kind })
     }
@@ -896,6 +1059,7 @@ app.put('/api/account/model', authRequired, async (request, response, next) => {
     }
     request.user.modelConfigs[kind] = config
     if (kind === 'chat') request.user.modelConfig = config
+    addEvent(request.user, { type: 'model_updated', description: `更新${modelKindLabels[kind]}配置 · ${model}` })
     await persistStore()
     response.json({ model: {
       provider,
@@ -972,6 +1136,8 @@ app.post('/api/projects', authRequired, async (request, response, next) => {
     }
     if (!isValidProject(project)) return response.status(400).json({ error: '无效的项目数据' })
     await writeUserProject(request.user, project)
+    addEvent(request.user, { type: 'project_created', description: `新增${project.projectType === 'script' ? '剧本' : '画布'}项目` })
+    await persistStore()
     response.status(201).json(project)
   } catch (error) {
     next(error)
@@ -1065,12 +1231,14 @@ app.post('/api/tools/video/generate', authRequired, async (request, response) =>
   const sceneId = request.body?.sceneId
   const duration = request.body?.duration
   const aspectRatio = request.body?.aspectRatio
+  const resolution = request.body?.resolution ?? '720p'
   if (typeof projectId !== 'string' || !/^[\da-f-]{36}$/i.test(projectId)
     || typeof sceneId !== 'string' || !sceneId || sceneId.length > 100) {
     return response.status(400).json({ error: '项目或分镜编号无效' })
   }
   if (!/^(?:[4-9]|[12]\d|30)$/.test(String(duration))
-    || !['16:9', '9:16'].includes(aspectRatio)) {
+    || !['16:9', '9:16'].includes(aspectRatio)
+    || !['480p', '720p', '1080p'].includes(resolution)) {
     return response.status(400).json({ error: '视频生成参数无效' })
   }
 
@@ -1106,7 +1274,9 @@ app.post('/api/tools/video/generate', authRequired, async (request, response) =>
     const textReferences = []
     for (const reference of assetReferences) {
       if (!/^https?:\/\//i.test(reference)) {
-        textReferences.push(reference)
+        const asset = (project.assets ?? []).find((item) => item && typeof item.name === 'string' && item.name.toLowerCase() === reference.replace(/^@/, '').toLowerCase())
+        if (asset?.prompt?.trim()) textReferences.push(`${asset.type === 'character' ? '人物' : asset.type === 'scene' ? '场景' : '物品'}「${asset.name}」：${asset.prompt.trim()}`)
+        else textReferences.push(reference.replace(/^@/, ''))
         continue
       }
       let referenceUrl
@@ -1126,12 +1296,13 @@ app.post('/api/tools/video/generate', authRequired, async (request, response) =>
     }
     if (imageReferences.length > 1) return response.status(400).json({ error: 'Muse Video 每个任务最多引用 1 张图片，请移除多余图片链接' })
 
-    const prompt = textReferences.length
-      ? `${videoPrompt}\n\n参考资产：${textReferences.join('、')}`
+    const assetPrompt = textReferences.length ? `\n\n资产设定（按提示词中的 @名称 对应使用，保持外观与场景一致）：\n${textReferences.join('\n')}` : ''
+    const prompt = assetPrompt
+      ? `${videoPrompt}${assetPrompt}`
       : videoPrompt
     const params = {
       duration: String(duration),
-      resolution: '720p',
+      resolution,
       aspect_ratio: aspectRatio,
       ...(imageReferences.length ? { images: imageReferences } : {}),
     }

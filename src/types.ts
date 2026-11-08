@@ -21,6 +21,17 @@ export type Scene = {
   details?: Record<string, string>
 }
 
+export type CreativeAsset = {
+  id: string
+  type: 'character' | 'scene' | 'prop'
+  name: string
+  prompt: string
+  mediaUrl?: string
+  mediaType?: 'image' | 'video'
+  mediaName?: string
+  mediaSize?: number
+}
+
 export type Project = {
   id?: string
   projectType?: 'canvas' | 'script'
@@ -33,4 +44,19 @@ export type Project = {
     characters?: Record<string, string>[]
     props?: Record<string, string>[]
   }
+  assets?: CreativeAsset[]
+}
+
+export type ShowcaseItem = {
+  id: string
+  kind: 'image' | 'video'
+  title: string
+  caption: string
+  tag?: string
+  duration?: string
+  art: string
+  mediaUrl?: string
+  visible?: boolean
+  order?: number
+  createdAt?: string
 }
